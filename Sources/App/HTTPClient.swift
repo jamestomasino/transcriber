@@ -8,7 +8,20 @@ import Security
 // hitting the network.
 
 public final class URLSessionHTTPClient: HTTPClient, @unchecked Sendable {
-    public init() {}
+    private let session: URLSession
+
+    public init(requestTimeout: TimeInterval = HTTPRetryPolicy.defaultRequestTimeout) {
+        // URLSession.shared caps a request at 60s, which is far too short for a
+        // long meeting: uploading a long recording (Deepgram) or sending a long
+        // transcript to the LLM can legitimately take minutes. Use a dedicated
+        // session with a generous timeout so long meetings don't fail mid-flight.
+        // `timeoutIntervalForResource` is set even higher to bound the *whole*
+        // transfer (including retries) without cutting it off prematurely.
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = requestTimeout
+        config.timeoutIntervalForResource = requestTimeout * 4
+        self.session = URLSession(configuration: config)
+    }
 
     public func send(_ request: HTTPRequest) async throws -> HTTPResponse {
         var req = URLRequest(url: request.url)
@@ -16,7 +29,7 @@ public final class URLSessionHTTPClient: HTTPClient, @unchecked Sendable {
         for (k, v) in request.headers { req.setValue(v, forHTTPHeaderField: k) }
         req.httpBody = request.body
 
-        let (data, response) = try await URLSession.shared.data(for: req)
+        let (data, response) = try await session.data(for: req)
         guard let http = response as? HTTPURLResponse else {
             throw HTTPError.badStatus(0)
         }

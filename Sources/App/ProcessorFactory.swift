@@ -38,7 +38,12 @@ public struct URLSessionModelDownloader: ModelDownloader {
 // the Core components stay pure and unit-testable.
 
 public enum ProcessorFactory {
-    public static func make(settings: AppSettings, http: any HTTPClient = URLSessionHTTPClient()) -> any MeetingProcessor {
+    public static func make(settings: AppSettings, http: (any HTTPClient)? = nil) -> any MeetingProcessor {
+        // The real pipeline client: the URLSession client (generous timeout so
+        // long meetings don't fail mid-upload) wrapped in the retrying
+        // decorator, so a transient 429/5xx/network hiccup is retried instead
+        // of failing the meeting outright.
+        let http = http ?? RetryingHTTPClient(inner: URLSessionHTTPClient())
         let transcriber: any Transcriber
         let diarizer: any Diarizer
         switch settings.transcriptionBackend {
@@ -58,7 +63,8 @@ public enum ProcessorFactory {
         )
     }
 
-    public static func makeSummarizer(settings: AppSettings, http: any HTTPClient = URLSessionHTTPClient()) -> any Summarizer {
+    public static func makeSummarizer(settings: AppSettings, http: (any HTTPClient)? = nil) -> any Summarizer {
+        let http = http ?? RetryingHTTPClient(inner: URLSessionHTTPClient())
         switch settings.summaryBackend {
         case .openai:
             return OpenAISummarizer(model: settings.summaryModel, apiKey: { Keychain.get("openai_api_key") }, http: http)

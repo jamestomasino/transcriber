@@ -9,8 +9,10 @@ keeping only the summary.**
 > system-audio capture
 > path, the **transcribe → diarize → summarize → retention** pipeline,
 > **durable persistence**, a **settings window**, a **menu-bar item**, a
-> **meeting detail pane**, and **completion / failure notifications** are all
-> green (220 tests, including
+> **meeting detail pane**, **completion / failure notifications**, and
+> **long-meeting hardening** (generous HTTP timeouts + retry of transient
+> failures) are all
+> green (249 tests, including
 > integration tests that drive the real pipeline → real store → the copyable
 > text the detail pane shows, across the default-retention, retry, and
 > transcript-kept paths, plus a startup orphan sweep so per-meeting recording
@@ -61,6 +63,13 @@ keeping only the summary.**
   The decision is pure Core (`MeetingNotificationPolicy`) and tested; the App
   layer posts it via `UserNotifications` (authorization requested once at
   launch). Toggle it off in Settings → **Notify when a summary is ready**.
+- **Long-meeting hardening**: the cloud HTTP client uses a generous per-request
+  timeout (300s, not `URLSession.shared`'s 60s) so a long recording's upload or
+  a long transcript's trip to the LLM isn't cut off mid-flight, and it retries
+  transient failures (rate limits, 5xx, network timeouts) up to a cap while
+  never retrying 4xx client errors. The retry decision is pure Core
+  (`HTTPRetryPolicy`) and tested with a scripted fake; the App wires the real
+  client + retry into the pipeline by default.
 - A **meeting detail pane**: select any meeting to read its full structured
   summary (overall, key points, decisions, action items) and the retained
   transcript (when you opted to keep it). A failed meeting shows its error and

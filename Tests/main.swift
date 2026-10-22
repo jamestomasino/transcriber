@@ -796,6 +796,118 @@ do {
     check(false, "deepgram: \(error)")
 }
 
+// MARK: - Phase 7: long-meeting hardening — retry policy (pure)
+section("http retry: pure policy decides which failures are worth retrying")
+do {
+    // Transient server / rate-limit statuses are retriable.
+    check(HTTPRetryPolicy.isRetryable(HTTPError.badStatus(429)), "429 (rate limited) is retriable")
+    check(HTTPRetryPolicy.isRetryable(HTTPError.badStatus(500)), "500 is retriable")
+    check(HTTPRetryPolicy.isRetryable(HTTPError.badStatus(502)), "502 is retriable")
+    check(HTTPRetryPolicy.isRetryable(HTTPError.badStatus(503)), "503 is retriable")
+    check(HTTPRetryPolicy.isRetryable(HTTPError.badStatus(504)), "504 is retriable")
+
+    // Client errors and other HTTP errors are NOT retriable — retrying just wastes a round trip.
+    check(!HTTPRetryPolicy.isRetryable(HTTPError.badStatus(400)), "400 is not retriable")
+    check(!HTTPRetryPolicy.isRetryable(HTTPError.badStatus(401)), "401 (bad key) is not retriable")
+    check(!HTTPRetryPolicy.isRetryable(HTTPError.badStatus(404)), "404 is not retriable")
+    check(!HTTPRetryPolicy.isRetryable(HTTPError.noBody), "noBody is not retriable")
+    check(!HTTPRetryPolicy.isRetryable(HTTPError.decoding("x")), "decoding is not retriable")
+
+    // Transient network hiccups (timeouts, dropped connection) are retriable.
+    check(HTTPRetryPolicy.isRetryable(URLError(.timedOut)), "URLError.timedOut is retriable")
+    check(HTTPRetryPolicy.isRetryable(URLError(.networkConnectionLost)), "connection lost is retriable")
+    check(HTTPRetryPolicy.isRetryable(URLError(.notConnectedToInternet)), "no network is retriable")
+    check(HTTPRetryPolicy.isRetryable(URLError(.cannotConnectToHost)), "cannot connect is retriable")
+
+    // A non-transient URLError (bad server response, user cancellation) is not retriable.
+    check(!HTTPRetryPolicy.isRetryable(URLError(.badURL)), "bad URL is not retriable")
+    check(!HTTPRetryPolicy.isRetryable(URLError(.badServerResponse)), "bad server response is not retriable")
+    check(!HTTPRetryPolicy.isRetryable(URLError(.cancelled)), "user cancellation is not retriable")
+
+    // An unrelated error type is never retriable.
+    struct PlainError: Error {}
+    check(!HTTPRetryPolicy.isRetryable(PlainError()), "unknown error is not retriable")
+
+    // The generous defaults are sensible for long meetings.
+    check(HTTPRetryPolicy.defaultMaxAttempts >= 2, "default allows at least one retry")
+    check(HTTPRetryPolicy.defaultRequestTimeout > 60, "default request timeout beats URLSession.shared's 60s")
+}
+
+// MARK: - Phase 7: long-meeting hardening — retrying client (decorator)
+section("http retry: decorator retries transient failures, respects the cap, never retries 4xx")
+do {
+    final class ScriptedHTTP: HTTPClient, @unchecked Sendable {
+        private let lock = NSLock()
+        private var _calls = 0
+        var calls: Int { lock.lock(); defer { lock.unlock() }; return _calls }
+        let outcomes: [Result<HTTPResponse, Error>]
+        init(outcomes: [Result<HTTPResponse, Error>]) { self.outcomes = outcomes }
+        func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+            lock.lock(); let idx = min(_calls, outcomes.count - 1); _calls += 1; lock.unlock()
+            switch outcomes[idx] {
+            case .success(let r): return r
+            case .failure(let e): throw e
+            }
+        }
+    }
+
+    // --- success after two transient 503s → 3 calls, returns the 200 ---
+    let okBody = Data(#"{"ok":true}"#.utf8)
+    let flaky = ScriptedHTTP(outcomes: [
+        .failure(HTTPError.badStatus(503)),
+        .failure(HTTPError.badStatus(503)),
+        .success(HTTPResponse(statusCode: 200, body: okBody)),
+    ])
+    let flakyClient = RetryingHTTPClient(inner: flaky, backoffDelay: 0)
+    let flakyResp = try await flakyClient.send(HTTPRequest(url: URL(string: "https://example.com")!))
+    check(flakyResp.statusCode == 200, "flaky: returns the eventual success")
+    check(flaky.calls == 3, "flaky: took exactly 3 attempts (2 failures + 1 success)")
+
+    // --- succeeds on the first try → exactly one call, no wasted retry ---
+    let oneShot = ScriptedHTTP(outcomes: [.success(HTTPResponse(statusCode: 200, body: okBody))])
+    let oneShotClient = RetryingHTTPClient(inner: oneShot, backoffDelay: 0)
+    _ = try await oneShotClient.send(HTTPRequest(url: URL(string: "https://example.com")!))
+    check(oneShot.calls == 1, "one-shot: a clean success is not retried")
+
+    // --- transient URLError (timeout) then success → retried ---
+    let timeoutThenOk = ScriptedHTTP(outcomes: [
+        .failure(URLError(.timedOut)),
+        .success(HTTPResponse(statusCode: 200, body: okBody)),
+    ])
+    let timeoutClient = RetryingHTTPClient(inner: timeoutThenOk, backoffDelay: 0)
+    let timeoutResp = try await timeoutClient.send(HTTPRequest(url: URL(string: "https://example.com")!))
+    check(timeoutResp.statusCode == 200, "timeout: recovers after a transient timeout")
+    check(timeoutThenOk.calls == 2, "timeout: one retry then success")
+
+    // --- cap respected: 503 forever → exactly maxAttempts calls, then throws ---
+    let always503 = ScriptedHTTP(outcomes: [.failure(HTTPError.badStatus(503))])
+    let capped = RetryingHTTPClient(inner: always503, maxAttempts: 3, backoffDelay: 0)
+    do {
+        _ = try await capped.send(HTTPRequest(url: URL(string: "https://example.com")!))
+        check(false, "cap: should have thrown after exhausting retries")
+    } catch let e as HTTPError {
+        check(e == .badStatus(503), "cap: rethrows the last transient error")
+        check(always503.calls == 3, "cap: stopped at exactly maxAttempts (3) calls")
+    } catch {
+        check(false, "cap: threw the wrong error: \(error)")
+    }
+
+    // --- a 4xx is never retried, even if more attempts remain ---
+    let client401 = ScriptedHTTP(outcomes: [.failure(HTTPError.badStatus(401))])
+    let noRetry = RetryingHTTPClient(inner: client401, maxAttempts: 5, backoffDelay: 0)
+    do {
+        _ = try await noRetry.send(HTTPRequest(url: URL(string: "https://example.com")!))
+        check(false, "401: should have thrown")
+    } catch let e as HTTPError {
+        check(e == .badStatus(401), "401: rethrows the client error")
+        check(client401.calls == 1, "401: a client error is never retried (exactly 1 call)")
+    } catch {
+        check(false, "401: threw the wrong error: \(error)")
+    }
+} catch {
+    check(false, "http retry: \(error)")
+}
+
 // MARK: - Settings: updateSettings persists to disk
 
 section("updateSettings persists to settings.json")

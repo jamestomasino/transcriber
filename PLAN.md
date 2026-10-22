@@ -5,10 +5,10 @@ captures Zoom / Slack / Teams conversations), then turns that recording into a
 **transcript with identified speakers**, writes a **meeting summary**, and keeps
 only the **summary** — deleting the audio and the transcript.
 
-> **Implementation progress (as of the meeting detail pane, orphan sweep, and notifications).**
+> **Implementation progress (as of the meeting detail pane, orphan sweep, notifications, and long-meeting hardening).**
 > Phases 0–5 plus the Settings window, menu bar, the meeting detail pane, the
-> startup orphan sweep, and **notifications** are built and green
-> (220 tests, `bash build.sh test`):
+> startup orphan sweep, **notifications**, and **long-meeting hardening** are
+> built and green (249 tests, `bash build.sh test`):
 > the pure core model + engine, mic +
 > system audio capture, the **transcribe → diarize → summarize → retention**
 > pipeline (pluggable Apple Speech / Deepgram + OpenAI / Anthropic), **durable
@@ -37,9 +37,19 @@ only the **summary** — deleting the audio and the transcript.
 > failure, and nothing at all when the toggle is off) feeds a `notifier` seam
 > on the view model, and the App layer posts it via `UserNotifications`
 > (requesting authorization once at launch). The decision is pure Core and
-> tested; the App owns the platform framework. Remaining: the Phase 6–7
-> polish (onboarding, long-meeting hardening) and a live end-to-end run with a
-> real key. Note: the detail pane's on-screen rendering has been verified only
+> tested; the App owns the platform framework. **Long-meeting hardening** is
+> done: the real HTTP client (`URLSessionHTTPClient`) now uses a dedicated
+> `URLSession` with a generous request timeout (`HTTPRetryPolicy.
+> defaultRequestTimeout`, 300s) instead of `URLSession.shared`'s 60s cap, so a
+> long recording's upload to Deepgram or a long transcript's trip to the LLM
+> can't be cut off mid-flight; and the pipeline's client is wrapped in a pure
+> `HTTPRetryPolicy`-driven `RetryingHTTPClient` (Core) that retries transient
+> 429 / 5xx / network-timeout failures up to a cap while never retrying 4xx
+> client errors — the decision is pure Core and tested with a scripted fake, the
+> backoff delay is injectable so the suite stays instant, and the App wires the
+> real client + retry into `ProcessorFactory` by default. Remaining: the
+> Phase 7 onboarding polish and a live end-to-end run with a real key. Note:
+> the detail pane's on-screen rendering has been verified only
 > indirectly — the app launches with seeded data and its window opens, and the
 > copyable text it shows is covered by
 > the integration test — but the live display was asleep during the session, so
