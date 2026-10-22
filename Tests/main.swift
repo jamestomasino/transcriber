@@ -796,6 +796,103 @@ do {
     check(false, "deepgram: \(error)")
 }
 
+// MARK: - Settings: updateSettings persists to disk
+
+section("updateSettings persists to settings.json")
+RecordingsDirectory.baseDirectory = {
+    FileManager.default.temporaryDirectory
+        .appendingPathComponent("transcriber-settings-\(UUID().uuidString)", isDirectory: true)
+}
+do {
+    let settingsURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent("t_settings_\(UUID().uuidString).json")
+    defer { try? FileManager.default.removeItem(at: settingsURL) }
+
+    let store = SettingsStore(url: settingsURL)
+    let capDir = RecordingsDirectory.base()
+    var vm = TranscriberViewModel(
+        capture: RecordingAudioCapture(directory: capDir),
+        processor: FakeProcessor(),
+        settings: AppSettings(),
+        settingsStore: store
+    )
+
+    check(vm.settings.transcriptionBackend == .local, "default backend is local")
+    vm.updateSettings { $0.transcriptionBackend = .deepgram }
+    vm.updateSettings { $0.summaryBackend = .anthropic }
+    vm.updateSettings { $0.keepAudioAfterSummary = true }
+    vm.updateSettings { $0.language = "fr" }
+
+    check(vm.settings.transcriptionBackend == .deepgram, "in-memory backend updated")
+    check(vm.settings.summaryBackend == .anthropic, "in-memory summary backend updated")
+    check(vm.settings.keepAudioAfterSummary == true, "in-memory retention updated")
+    check(vm.settings.language == "fr", "in-memory language updated")
+
+    // A fresh store reading the same file sees the changes (persisted).
+    let reloaded = SettingsStore(url: settingsURL).load()
+    check(reloaded.transcriptionBackend == .deepgram, "backend persisted to disk")
+    check(reloaded.summaryBackend == .anthropic, "summary backend persisted to disk")
+    check(reloaded.keepAudioAfterSummary == true, "retention persisted to disk")
+    check(reloaded.language == "fr", "language persisted to disk")
+} catch {
+    check(false, "updateSettings: \(error)")
+}
+
+// MARK: - Settings: processor factory is consulted with live settings
+
+section("runPipeline rebuilds the pipeline from current settings (factory seam)")
+RecordingsDirectory.baseDirectory = {
+    FileManager.default.temporaryDirectory
+        .appendingPathComponent("transcriber-factory-\(UUID().uuidString)", isDirectory: true)
+}
+do {
+    // A processor that reports which backend it was built for, so we can assert
+    // the factory saw the *current* settings at run time.
+    final class BackendTagProcessor: MeetingProcessor, @unchecked Sendable {
+        let tag: String
+        init(tag: String) { self.tag = tag }
+        func process(meeting: Meeting, audio: CapturedAudio,
+                     report: @Sendable (ProcessingProgress) -> Void) async throws -> ProcessedResult {
+            return ProcessedResult(
+                segments: [TranscriptSegment(speaker: "Speaker 1", text: "hi", startOffset: 0, endOffset: 1)],
+                summary: MeetingSummary(overall: "built for \(tag)")
+            )
+        }
+    }
+
+    let capDir = RecordingsDirectory.base()
+    var vm = TranscriberViewModel(
+        capture: RecordingAudioCapture(directory: capDir),
+        processor: BackendTagProcessor(tag: "initial"),
+        settings: AppSettings(),
+        // Factory rebuilds from the settings it is handed at run time.
+        processorFactory: { settings in
+            BackendTagProcessor(tag: settings.transcriptionBackend == .deepgram ? "deepgram" : "local")
+        }
+    )
+
+    let m = await vm.startAsync(title: "factory test")
+    await vm.stopAsync()   // stopAsync runs the pipeline (via the factory)
+    check(vm.meetings.first(where: { $0.id == m.id })?.status == .summarized,
+          "pipeline succeeded via factory")
+
+    // The factory was consulted (not the fixed initial processor), because the
+    // default settings backend is .local → tag "local", not "initial".
+    check(vm.meetings.first(where: { $0.id == m.id })?.summary?.overall == "built for local",
+          "factory saw current settings (local), not the fixed initial processor")
+
+    // Now flip the backend in settings and run again: the factory must see it.
+    vm.updateSettings { $0.transcriptionBackend = .deepgram }
+    let m2 = await vm.startAsync(title: "factory test 2")
+    await vm.stopAsync()
+    check(vm.meetings.first(where: { $0.id == m2.id })?.status == .summarized,
+          "second pipeline succeeded via factory")
+    check(vm.meetings.first(where: { $0.id == m2.id })?.summary?.overall == "built for deepgram",
+          "factory saw the *updated* backend (deepgram) after a settings change")
+} catch {
+    check(false, "factory seam: \(error)")
+}
+
 // MARK: - Report
 print("\n\(passed) passed, \(failed) failed")
 if failed > 0 {

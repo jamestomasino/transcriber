@@ -5,17 +5,21 @@ from Zoom / Slack / Teams), transcribes it with speaker identification, generate
 a structured summary, and then **deletes the audio and the raw transcript,
 keeping only the summary.**
 
-> **Status:** Phase 5 (persistence) in progress. The build, test harness, pure
-> core model + engine, the mic + system-audio capture path, the
-> **transcribe → diarize → summarize → retention** pipeline, and **durable
-> persistence** are in place and green (142 tests). Transcription is pluggable —
-> **local Apple Speech** (private, on-device, no key) by default, or **Deepgram**
-> for accurate speaker ID — and summarization runs on **OpenAI** or
-> **Anthropic**. A download-on-demand model store is in place for
-> local-model backends. A live level meter and a permission / capture status
-> card are wired into the UI. Meeting summaries now **survive a relaunch**
+> **Status:** Phase 6 (Settings UI + menu bar) in progress. The build, test
+> harness, pure core model + engine, the mic + system-audio capture path, the
+> **transcribe → diarize → summarize → retention** pipeline, **durable
+> persistence**, and a **settings window** are in place and green (155 tests).
+> Transcription is pluggable — **local Apple Speech** (private, on-device, no
+> key) by default, or **Deepgram** for accurate speaker ID — and summarization
+> runs on **OpenAI** or **Anthropic**. A download-on-demand model store is in
+> place for local-model backends. A live level meter and a permission / capture
+> status card are wired into the UI. Meeting summaries **survive a relaunch**
 > (`MeetingStore` → `meetings.json`), which is the product's core promise: the
-> summary is the only durable artifact. See [PLAN.md](PLAN.md).
+> summary is the only durable artifact. Backends, models, retention, and API
+> keys are now **user-configurable in the Settings window** (⌘,) — and because
+> the pipeline is rebuilt from the *current* settings at run time, switching
+> backend or model takes effect on the next meeting without a relaunch. A
+> **menu-bar item** offers a live Start / Stop. See [PLAN.md](PLAN.md).
 
 ## Features
 
@@ -30,11 +34,20 @@ keeping only the summary.**
   processing) when the app quit is reconciled to a retryable `.failed` state on
   next launch.
 - Pluggable transcription + summarization backends (see Backends below).
+- A **Settings window** (Transcriber ▸ Settings, ⌘,) to configure capture
+  sources, retention, the transcription/summary backends, models, and language,
+  and to enter/clear API keys. Every change is persisted to `settings.json`
+  immediately (API keys go to the Keychain, never to disk in plain text).
+- **Live backend switching**: the pipeline is rebuilt from the *current*
+  settings at run time, so changing backend or model in Settings takes effect
+  on the next meeting without a relaunch.
+- A **menu-bar item** with a live Start / Stop, so a meeting can be started or
+  stopped without the main window focused.
 
 ## Backends
 
 Transcription and summarization are **pluggable**, selected via `AppSettings`
-(the Settings UI is a later phase; defaults are local + OpenAI):
+and configurable in the **Settings window** (⌘,). Defaults are local + OpenAI:
 
 | Stage        | Backend            | Notes                                                        |
 | ------------ | ------------------ | ------------------------------------------------------------ |

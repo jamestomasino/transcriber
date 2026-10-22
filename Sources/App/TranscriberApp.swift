@@ -18,7 +18,12 @@ struct TranscriberApp: App {
             processor: ProcessorFactory.make(settings: settings),
             settings: settings,
             settingsStore: settingsStore,
-            meetingStore: meetingStore
+            meetingStore: meetingStore,
+            // Rebuild the pipeline from the *current* settings at run time so
+            // switching backend / model in Settings takes effect on the next
+            // meeting without a relaunch. Keys are read lazily from the Keychain
+            // inside the factory, so Core stays pure.
+            processorFactory: { ProcessorFactory.make(settings: $0) }
         ))
     }
 
@@ -34,6 +39,37 @@ struct TranscriberApp: App {
                     .keyboardShortcut("q")
             }
         }
+
+        // The settings window (⌘, / Transcriber ▸ Settings): the only place a
+        // user configures backends, models, retention, and API keys.
+        Settings {
+            SettingsView(vm: vm)
+        }
+
+        // A menu-bar item with a live Start/Stop so a meeting can be started or
+        // stopped without the main window focused. macOS 13+, target is 14.
+        MenuBarExtra {
+            if vm.isRecording {
+                Label("Recording…", systemImage: "record.circle.fill")
+                    .foregroundStyle(.red)
+                    .disabled(true)
+                Divider()
+                Button("Stop") { vm.stop() }
+                    .keyboardShortcut(".", modifiers: .command)
+            } else {
+                Button("Start meeting") { vm.start(title: nil) }
+                    .keyboardShortcut("m", modifiers: [.command, .shift])
+            }
+            Divider()
+            Button("Open Transcriber") {
+                NSApp.activate(ignoringOtherApps: true)
+            }
+            Button("Quit") { NSApplication.shared.terminate(nil) }
+                .keyboardShortcut("q")
+        } label: {
+            Image(systemName: vm.isRecording ? "record.circle" : "waveform.circle")
+        }
+        .menuBarExtraStyle(.menu)
     }
 
     static var settingsURL: URL {

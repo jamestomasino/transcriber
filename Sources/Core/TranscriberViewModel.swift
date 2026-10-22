@@ -39,8 +39,16 @@ public final class TranscriberViewModel: ObservableObject {
     /// Defaults to `NoopProcessor` (does nothing) so the start/stop flow works
     /// before a backend is chosen.
     private let processor: any MeetingProcessor
-    /// User preferences (retention, backend, model, …).
-    public var settings: AppSettings
+    /// Optional factory that rebuilds the pipeline from the *current* settings
+    /// at run time. When present, `runPipeline` uses it (so switching backend /
+    /// model in Settings takes effect on the next meeting without a relaunch);
+    /// otherwise it falls back to the fixed `processor`. Pure: it only takes
+    /// `AppSettings` and returns a processor, so Core stays free of Keychain /
+    /// URLSession. The App wires it to `ProcessorFactory.make(settings:)`.
+    private let processorFactory: ((AppSettings) -> any MeetingProcessor)?
+    /// User preferences (retention, backend, model, …). Published so the
+    /// Settings UI reflects changes live and re-renders on update.
+    @Published public var settings: AppSettings
     private let settingsStore: SettingsStore?
     /// Durable store for the meetings themselves (summaries + retained
     /// transcripts). Optional so the test fakes and the legacy no-store path
@@ -60,11 +68,13 @@ public final class TranscriberViewModel: ObservableObject {
         processor: any MeetingProcessor = NoopProcessor(),
         settings: AppSettings = AppSettings(),
         settingsStore: SettingsStore? = nil,
-        meetingStore: MeetingStore? = nil
+        meetingStore: MeetingStore? = nil,
+        processorFactory: ((AppSettings) -> any MeetingProcessor)? = nil
     ) {
         self.engine = engine
         self.capture = capture
         self.processor = processor
+        self.processorFactory = processorFactory
         self.settings = settings
         self.settingsStore = settingsStore
         self.meetingStore = meetingStore
@@ -206,7 +216,12 @@ public final class TranscriberViewModel: ObservableObject {
         processingProgress = ProcessingProgress(stage: .transcribing, fraction: 0)
 
         do {
-            let result = try await processor.process(
+            // Resolve the pipeline from the *current* settings when a factory
+            // is wired (so Settings changes take effect without a relaunch),
+            // falling back to the fixed processor otherwise.
+            let active: any MeetingProcessor =
+                processorFactory?(settings) ?? processor
+            let result = try await active.process(
                 meeting: meeting,
                 audio: CapturedAudio(fileURLs: meeting.audioFileURLs),
                 report: { [weak self] p in
