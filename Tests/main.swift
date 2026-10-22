@@ -1017,6 +1017,84 @@ do {
     check(false, "integration: \(error)")
 }
 
+// MARK: - Integration: default retention + retry render (detail-pane acceptance)
+section("integration: default retention clears transcript; retry then renders summary")
+do {
+    let realistic2 = ProcessedResult(
+        segments: [TranscriptSegment(speaker: "Alice", text: "default path")],
+        summary: MeetingSummary(overall: "Default-retention result.", keyPoints: ["kp"])
+    )
+
+    // --- 1. DEFAULT retention (keepTranscript=false, the product's promise) ---
+    // The transcript must be cleared after summarizing, so transcriptText() is
+    // empty (detail pane hides the transcript section) while summaryText()
+    // still renders the summary.
+    let dDir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("transcriber-def-\(UUID().uuidString)")
+    RecordingsDirectory.baseDirectory = { dDir }
+    let dFile = dDir.appendingPathComponent("meetings.json")
+    let dvm = TranscriberViewModel(
+        capture: RecordingAudioCapture(directory: dDir),
+        processor: FakeProcessor(result: realistic2),
+        settings: AppSettings(),                       // keepTranscriptAfterSummary = false
+        settingsStore: SettingsStore.inMemory(),
+        meetingStore: MeetingStore(url: dFile)
+    )
+    let dm = await dvm.startAsync(title: "Default retention")
+    await dvm.stopAsync()
+    let dgot = dvm.meetings.first(where: { $0.id == dm.id })
+    check(dgot?.status == .summarized, "default: summarized")
+    check(dgot?.transcript.isEmpty == true, "default: transcript cleared (product promise)")
+    check((dgot?.transcriptText() ?? "") == "", "default: transcriptText empty → pane hides transcript")
+    check((dgot?.summaryText() ?? "").hasPrefix("Default-retention result."),
+          "default: summaryText still renders the summary")
+    // And it is stable across the persistence boundary.
+    let dReload = MeetingStore(url: dFile).load().first(where: { $0.id == dm.id })
+    check(dReload?.transcript.isEmpty == true, "default: cleared transcript persists as empty")
+    check((dReload?.summaryText() ?? "") == (dgot?.summaryText() ?? ""),
+          "default: summaryText stable across store reload")
+
+    // --- 2. RETRY then render (the detail pane's failed → retry → summary flow) ---
+    // Session A: the pipeline throws → the meeting is failed, NO summary, so
+    // summaryText() is empty (the pane shows the failed/error state).
+    let rDir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("transcriber-retr-\(UUID().uuidString)")
+    RecordingsDirectory.baseDirectory = { rDir }
+    let rFile = rDir.appendingPathComponent("meetings.json")
+    let rvm = TranscriberViewModel(
+        capture: RecordingAudioCapture(directory: rDir),
+        processor: FakeProcessor(shouldThrow: ModelError.notFound("whisper-base")),
+        settings: AppSettings(),
+        settingsStore: SettingsStore.inMemory(),
+        meetingStore: MeetingStore(url: rFile)
+    )
+    let rm = await rvm.startAsync(title: "Will retry")
+    await rvm.stopAsync()
+    let rfailed = rvm.meetings.first(where: { $0.id == rm.id })
+    check(rfailed?.status == .failed, "retry: meeting is failed after a throwing pipeline")
+    check((rfailed?.summaryText() ?? "") == "", "retry: no summary yet → summaryText empty (pane shows error)")
+
+    // Session B: the user fixes the backend (now a working processor) and
+    // retries. The detail pane's Retry button calls vm.retry(id:).
+    let rvm2 = TranscriberViewModel(
+        capture: RecordingAudioCapture(directory: rDir),
+        processor: FakeProcessor(result: realistic2),
+        settings: AppSettings(),
+        settingsStore: SettingsStore.inMemory(),
+        meetingStore: MeetingStore(url: rFile)   // loads the failed meeting from disk
+    )
+    let loadedFailed = rvm2.meetings.first(where: { $0.id == rm.id })
+    check(loadedFailed?.status == .failed, "retry: failed meeting loaded from disk")
+    let retried = await rvm2.retry(id: rm.id)
+    check(retried, "retry: vm.retry(id:) reports success")
+    let rdone = rvm2.meetings.first(where: { $0.id == rm.id })
+    check(rdone?.status == .summarized, "retry: now summarized")
+    check((rdone?.summaryText() ?? "").hasPrefix("Default-retention result."),
+          "retry: summaryText now renders the summary after a successful retry")
+} catch {
+    check(false, "default-retention/retry: \(error)")
+}
+
 // MARK: - Report
 print("\n\(passed) passed, \(failed) failed")
 if failed > 0 {

@@ -7,7 +7,7 @@ only the **summary** — deleting the audio and the transcript.
 
 > **Implementation progress (as of the meeting detail pane).** Phases 0–5
 > plus the Settings window, menu bar, and the meeting detail pane are built and
-> green (174 tests, `bash build.sh test`): the pure core model + engine, mic +
+> green (186 tests, `bash build.sh test`): the pure core model + engine, mic +
 > system audio capture, the **transcribe → diarize → summarize → retention**
 > pipeline (pluggable Apple Speech / Deepgram + OpenAI / Anthropic), **durable
 > persistence** via `MeetingStore` → `meetings.json`, and a **Settings window**
