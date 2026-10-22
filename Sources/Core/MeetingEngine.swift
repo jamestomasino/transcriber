@@ -101,21 +101,45 @@ public final class MeetingEngine {
         meetings[idx].lastActivityAt = t
     }
 
-    /// Record a successful summary. Clears the transient transcript (the
-    /// on-disk audio deletion is a *side effect* handled by the view model +
-    /// `RetentionPolicy`, not the engine).
+    /// Record a successful summary. By default clears the transient transcript
+    /// (the product's core promise: keep only the summary). If `keepTranscript`
+    /// is true (the user's retention setting), the transcript is retained in
+    /// the record. The on-disk audio/transcript-file deletion is a *side
+    /// effect* handled by the view model + `RetentionPolicy`, not the engine.
     public func markSummarized(
         id: UUID,
         summary: MeetingSummary,
         speakerCount: Int,
+        keepTranscript: Bool = false,
         now: Date? = nil
     ) {
         let t = now ?? clock.now()
         guard let idx = index(of: id) else { return }
         meetings[idx].summary = summary
         meetings[idx].speakerCount = speakerCount
-        meetings[idx].transcript = []
+        if !keepTranscript {
+            meetings[idx].transcript = []
+        }
         meetings[idx].status = .summarized
+        meetings[idx].lastActivityAt = t
+    }
+
+    /// Attach a transcript to a meeting (set by the view model after the
+    /// transcribe stage, so the record is inspectable even before summarizing).
+    public func setTranscript(id: UUID, segments: [TranscriptSegment], now: Date? = nil) {
+        let t = now ?? clock.now()
+        guard let idx = index(of: id) else { return }
+        meetings[idx].transcript = segments
+        meetings[idx].lastActivityAt = t
+    }
+
+    /// Drop the stored audio file URLs from the record (after the view model
+    /// has deleted the files per `RetentionPolicy`). The engine never touches
+    /// the filesystem — this only clears the in-memory record.
+    public func clearAudioFiles(id: UUID, now: Date? = nil) {
+        let t = now ?? clock.now()
+        guard let idx = index(of: id) else { return }
+        meetings[idx].audioFileURLs = [:]
         meetings[idx].lastActivityAt = t
     }
 

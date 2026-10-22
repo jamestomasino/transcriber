@@ -23,11 +23,21 @@ CORE_SRC=(
   Sources/Core/MeetingEngine.swift
   Sources/Core/TranscriberViewModel.swift
   Sources/Core/AudioCapture.swift
+  Sources/Core/Pipeline.swift
+  Sources/Core/Models.swift
+  Sources/Core/Settings.swift
+  Sources/Core/HTTP.swift
+  Sources/Core/Summary.swift
+  Sources/Core/LLM.swift
+  Sources/Core/CloudTranscriber.swift
 )
 APP_SRC=(
   Sources/App/TranscriberApp.swift
   Sources/App/ContentView.swift
   Sources/App/RealAudioCapture.swift
+  Sources/App/HTTPClient.swift
+  Sources/App/LocalTranscriber.swift
+  Sources/App/ProcessorFactory.swift
 )
 TEST_SRC=(
   Tests/main.swift

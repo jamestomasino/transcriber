@@ -49,6 +49,42 @@ func reset() {
     engine = MeetingEngine(clock: clock)
 }
 
+// A `MeetingProcessor` for tests: returns a fixed result and (optionally) lets
+// the test observe that the pipeline ran. Lets us assert the VM drives the
+// pipeline + retention without any real transcription.
+final class FakeProcessor: MeetingProcessor, @unchecked Sendable {
+    let result: ProcessedResult
+    var shouldThrow: Error?
+    let onRun: ((Meeting) -> Void)?
+    private let lock = NSLock()
+    private var _runs = 0
+    var runs: Int { lock.lock(); defer { lock.unlock() }; return _runs }
+
+    init(
+        result: ProcessedResult = ProcessedResult(
+            segments: [
+                TranscriptSegment(speaker: "Speaker 1", text: "hello", startOffset: 0, endOffset: 1),
+                TranscriptSegment(speaker: "Speaker 2", text: "world", startOffset: 2, endOffset: 3),
+            ],
+            summary: MeetingSummary(overall: "A test summary.", keyPoints: ["kp1"])
+        ),
+        shouldThrow: Error? = nil,
+        onRun: ((Meeting) -> Void)? = nil
+    ) {
+        self.result = result
+        self.shouldThrow = shouldThrow
+        self.onRun = onRun
+    }
+
+    func process(meeting: Meeting, audio: CapturedAudio, report: @Sendable (ProcessingProgress) -> Void) async throws -> ProcessedResult {
+        lock.lock(); _runs += 1; lock.unlock()
+        onRun?(meeting)
+        if let e = shouldThrow { throw e }
+        report(ProcessingProgress(stage: .summarizing, fraction: 1))
+        return result
+    }
+}
+
 // MARK: - Start / stop
 section("start/stop")
 reset()
@@ -193,21 +229,21 @@ do {
     let vmCapDir = RecordingsDirectory.base()
     let vmEngine = MeetingEngine(clock: clock)
     let vmCap = RecordingAudioCapture(directory: vmCapDir)
-    var processRan = false
-    let vm = TranscriberViewModel(engine: vmEngine, capture: vmCap) { _ in processRan = true }
+    let vmFake = FakeProcessor()
+    let vm = TranscriberViewModel(engine: vmEngine, capture: vmCap, processor: vmFake)
 
     let m = await vm.startAsync(title: "VM Meeting")
     check(vm.isRecording, "VM reports recording after start")
     check(vmEngine.active?.id == m.id, "engine has the active meeting")
 
     await vm.stopAsync()
-    check(vmEngine.meeting(id: m.id)!.status == .processing, "meeting is processing after stop")
-    let files = vmEngine.meeting(id: m.id)!.audioFileURLs
-    check(files.count == 2, "audioFileURLs recorded (mic + system)")
-    check(files[.mic] != nil, "mic file URL recorded")
-    check(files[.system] != nil, "system file URL recorded")
-    check(files[.mic]!.lastPathComponent == "mic.wav", "mic file named correctly")
-    check(processRan, "process pipeline was invoked")
+    check(vmEngine.meeting(id: m.id)!.status == .summarized, "meeting is summarized after stop (pipeline ran)")
+    check(vmFake.runs == 1, "process pipeline was invoked")
+    check(vmEngine.meeting(id: m.id)!.summary?.overall == "A test summary.", "summary recorded on the meeting")
+    check(vmEngine.meeting(id: m.id)!.speakerCount == 2, "speaker count recorded (2)")
+    // Retention (default: keep only the summary): transcript cleared + audio files deleted.
+    check(vmEngine.meeting(id: m.id)!.transcript.isEmpty, "transcript cleared by retention (default)")
+    check(vmEngine.meeting(id: m.id)!.audioFileURLs.isEmpty, "audio file URLs cleared by retention (default)")
 } catch {
     check(false, "VM start/stop: \(error)")
 }
@@ -238,22 +274,30 @@ check(AudioCaptureError.sourceFailed(source: .system, detail: "x").description.c
 final class PartialFailureCapture: AudioCapture, @unchecked Sendable {
     private let lock = NSLock()
     private var _status: [AudioSource: AudioCaptureError] = [:]
+    private var _captured: [AudioSource: URL] = [:]
     var status: [AudioSource: AudioCaptureError] { lock.lock(); defer { lock.unlock() }; return _status }
+    var capturedFiles: [AudioSource: URL] { lock.lock(); defer { lock.unlock() }; return _captured }
+    func recordCaptured(_ urls: [AudioSource: URL]) { lock.lock(); _captured = urls; lock.unlock() }
     func level(_ source: AudioSource) -> Float { 0.5 }
     func start(sources: Set<AudioSource>, directory: URL) async throws -> AudioCaptureSession {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         if sources.contains(.system) {
             lock.lock(); _status[.system] = .screenRecordingNotAuthorized; lock.unlock()
         }
-        return PartialSession(directory: directory, sources: sources)
+        return PartialSession(capture: self, directory: directory, sources: sources)
     }
 }
 
 final class PartialSession: AudioCaptureSession, @unchecked Sendable {
+    private let capture: PartialFailureCapture
     private let directory: URL
     private let sources: Set<AudioSource>
     private var stopped = false
-    init(directory: URL, sources: Set<AudioSource>) { self.directory = directory; self.sources = sources }
+    init(capture: PartialFailureCapture, directory: URL, sources: Set<AudioSource>) {
+        self.capture = capture
+        self.directory = directory
+        self.sources = sources
+    }
     func stop() async throws -> CapturedAudio {
         if stopped { return CapturedAudio() }
         stopped = true
@@ -263,6 +307,7 @@ final class PartialSession: AudioCaptureSession, @unchecked Sendable {
             try Data().write(to: url)
             urls[.mic] = url
         }
+        capture.recordCaptured(urls)
         return CapturedAudio(fileURLs: urls)
     }
 }
@@ -275,7 +320,8 @@ RecordingsDirectory.baseDirectory = {
 do {
     let pEngine = MeetingEngine(clock: clock)
     let pCap = PartialFailureCapture()
-    let pvm = TranscriberViewModel(engine: pEngine, capture: pCap) { _ in }
+    let pFake = FakeProcessor()
+    let pvm = TranscriberViewModel(engine: pEngine, capture: pCap, processor: pFake)
 
     let pm = await pvm.startAsync(title: "Partial")
     // Mic succeeded, so the meeting is still recording (not failed).
@@ -288,14 +334,299 @@ do {
     check(pvm.captureStatusMessages.count == 1, "one status message (only the failed source)")
     check(pvm.captureStatusMessages.first!.contains("Screen Recording"), "message names the fix")
 
-    // Stopping still finalizes the mic file.
+    // Stopping finalizes the mic file, then runs the pipeline (summarizes).
     await pvm.stopAsync()
-    check(pEngine.meeting(id: pm.id)!.audioFileURLs[.mic] != nil, "mic file still recorded on stop")
-    check(pEngine.meeting(id: pm.id)!.audioFileURLs[.system] == nil, "no system file (it failed)")
+    check(pEngine.meeting(id: pm.id)!.status == .summarized, "pipeline still ran on stop (mic file present)")
+    check(pFake.runs == 1, "pipeline invoked once despite partial capture loss")
+    check(pEngine.meeting(id: pm.id)!.audioFileURLs.isEmpty, "audio cleared by retention after summarizing")
+    check(pCap.capturedFiles[.mic] != nil, "capture recorded the mic file before retention deleted it")
 } catch {
     check(false, "partial-failure VM: \(error)")
 }
 RecordingsDirectory.baseDirectory = nil
+
+// MARK: - Phase 4: pipeline composition
+section("pipeline: transcribe → diarize → summarize")
+final class StubTranscriber: Transcriber {
+    let segs: [TranscriptSegment]
+    init(segs: [TranscriptSegment]) { self.segs = segs }
+    func transcribe(audio: CapturedAudio, language: String) async throws -> [TranscriptSegment] { segs }
+}
+final class StubSummarizer: Summarizer {
+    func summarize(segments: [TranscriptSegment], title: String) async throws -> MeetingSummary {
+        MeetingSummary(overall: "sum of \(segments.count) segs", keyPoints: ["kp"])
+    }
+}
+do {
+    let rawSegs = [
+        TranscriptSegment(speaker: "?", text: "a", startOffset: 0, endOffset: 1),
+        TranscriptSegment(speaker: "?", text: "b", startOffset: 3, endOffset: 4),
+    ]
+    let p4 = PipelineProcessor(
+        transcriber: StubTranscriber(segs: rawSegs),
+        diarizer: HeuristicDiarizer(gapThreshold: 1.5),
+        summarizer: StubSummarizer(),
+        language: "en"
+    )
+    var lastProgress = ProcessingProgress(stage: .transcribing, fraction: 0)
+    let p4result = try await p4.process(meeting: Meeting(title: "P4", startedAt: t0, createdAt: t0, lastActivityAt: t0), audio: CapturedAudio(), report: { lastProgress = $0 })
+    check(p4result.summary.overall == "sum of 2 segs", "summarizer ran on diarized segments")
+    check(p4result.segments[0].speaker == "Speaker 1", "diarizer labeled first segment")
+    check(p4result.segments[1].speaker == "Speaker 2", "diarizer labeled second segment (gap)")
+    check(lastProgress.stage == .summarizing, "progress reached the summarizing stage")
+} catch {
+    check(false, "pipeline composition: \(error)")
+}
+
+// MARK: - Phase 4: heuristic diarizer
+section("diarizer: heuristic speaker splitting")
+do {
+    let d = HeuristicDiarizer(gapThreshold: 1.0)
+    let noGap = [
+        TranscriptSegment(speaker: "?", text: "a", startOffset: 0, endOffset: 0.5),
+        TranscriptSegment(speaker: "?", text: "b", startOffset: 0.6, endOffset: 1.0),
+    ]
+    let noGapOut = try await d.diarize(noGap)
+    check(noGapOut[0].speaker == "Speaker 1" && noGapOut[1].speaker == "Speaker 1", "no gap → same speaker")
+
+    let withGap = [
+        TranscriptSegment(speaker: "?", text: "a", startOffset: 0, endOffset: 0.5),
+        TranscriptSegment(speaker: "?", text: "b", startOffset: 5.0, endOffset: 5.5),
+    ]
+    let withGapOut = try await d.diarize(withGap)
+    check(withGapOut[0].speaker == "Speaker 1" && withGapOut[1].speaker == "Speaker 2", "gap → new speaker")
+
+    let emptyOut = try await d.diarize([])
+    check(emptyOut.isEmpty, "empty input → empty output")
+
+    let idOut = try await IdentityDiarizer().diarize([TranscriptSegment(speaker: "Alice", text: "x")])
+    check(idOut[0].speaker == "Alice", "identity diarizer preserves labels")
+} catch {
+    check(false, "diarizer: \(error)")
+}
+
+// MARK: - Phase 4: summary parser
+section("summary: lenient JSON parser")
+do {
+    let clean = Summary.parse(#"{"overall":"did things","key_points":["kp1","kp2"],"decisions":["d1"],"action_items":["a1"]}"#)
+    check(clean.overall == "did things", "parses overall")
+    check(clean.keyPoints.count == 2, "parses key_points")
+    check(clean.decisions == ["d1"], "parses decisions")
+    check(clean.actionItems == ["a1"], "parses action_items")
+
+    let fenced = Summary.parse("```json\n{\"overall\":\"fenced\"}\n```")
+    check(fenced.overall == "fenced", "parses a fenced JSON block")
+
+    let prose = Summary.parse("Here is the summary:\n{\"overall\":\"prose\",\"key_points\":[]}")
+    check(prose.overall == "prose", "parses JSON embedded in prose")
+
+    let camel = Summary.parse(#"{"overall":"c","keyPoints":["k"],"actionItems":["a"]}"#)
+    check(camel.keyPoints == ["k"] && camel.actionItems == ["a"], "tolerates camelCase keys")
+
+    let fallback = Summary.parse("plain text summary, no json")
+    check(fallback.overall == "plain text summary, no json", "falls back to raw text when no JSON")
+
+    let text = Summary.transcriptText([
+        TranscriptSegment(speaker: "S1", text: "hi"),
+        TranscriptSegment(speaker: "S2", text: "yo"),
+    ])
+    check(text == "S1: hi\nS2: yo", "transcriptText formats speaker: text")
+
+    let prompt = Summary.prompt(title: "T", transcript: "x")
+    check(prompt.contains("JSON object") && prompt.contains("T"), "prompt asks for JSON + includes title")
+} catch {
+    check(false, "summary parser: \(error)")
+}
+
+// MARK: - Phase 4: retention policy
+section("retention: delete audio + transcript, keep summary")
+do {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("transcriber-ret-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let micFile = dir.appendingPathComponent("mic.wav")
+    try Data().write(to: micFile)
+
+    let meeting = Meeting(
+        title: "Ret", startedAt: t0, createdAt: t0, lastActivityAt: t0,
+        audioFileURLs: [.mic: micFile, .system: dir.appendingPathComponent("sys.wav")]
+    )
+
+    // Default: keep only the summary → delete both audio files + transcript file.
+    let defaultPolicy = RetentionPolicy(settings: AppSettings())
+    let toDelete = defaultPolicy.artifactsToDelete(for: meeting)
+    check(toDelete.contains(micFile), "default policy deletes the mic file")
+    check(!defaultPolicy.keepTranscript, "default: transcript not kept")
+    check(!defaultPolicy.keepAudio, "default: audio not kept")
+
+    // Keep transcript + audio: nothing deleted.
+    let keepAll = RetentionPolicy(settings: AppSettings(keepTranscriptAfterSummary: true, keepAudioAfterSummary: true))
+    check(keepAll.artifactsToDelete(for: meeting).isEmpty, "keep-all policy deletes nothing")
+    check(keepAll.keepTranscript && keepAll.keepAudio, "keep-all flags are set")
+} catch {
+    check(false, "retention: \(error)")
+}
+try? FileManager.default.removeItem(at: FileManager.default.temporaryDirectory.appendingPathComponent("transcriber-ret-\(UUID().uuidString)", isDirectory: true))
+
+// MARK: - Phase 4: model store (download-on-demand, not bundle)
+section("models: download-on-demand + cache reuse")
+final class FakeDownloader: ModelDownloader {
+    var downloads = 0
+    private let lock = NSLock()
+    func download(spec: ModelSpec, to destination: URL, report: @Sendable (Double) -> Void) async throws {
+        lock.lock(); downloads += 1; lock.unlock()
+        report(1.0)
+        // Write a file at least sizeBytes/4 so the size check passes.
+        let size = max(1024, spec.sizeBytes / 4)
+        try Data(count: size).write(to: destination)
+    }
+}
+do {
+    let modelsDir = FileManager.default.temporaryDirectory.appendingPathComponent("transcriber-models-\(UUID().uuidString)", isDirectory: true)
+    ModelsDirectory.baseDirectory = { modelsDir }
+    let spec = WhisperCatalog.spec(id: "whisper-base")!
+    check(WhisperCatalog.all.count == 4, "catalog lists 4 model sizes")
+    check(spec.sizeBytes > 0, "catalog spec has a size")
+
+    let dl = FakeDownloader()
+    let store = ModelStore(downloader: dl)
+    check(!store.isCached(spec), "model not cached before first use")
+
+    let url1 = try await store.ensure(spec: spec)
+    check(url1.path.hasSuffix("whisper-base.bin"), "model cached under its id")
+    check(FileManager.default.fileExists(atPath: url1.path), "model file exists after download")
+    check(dl.downloads == 1, "downloaded exactly once")
+
+    let url2 = try await store.ensure(spec: spec)
+    check(url1 == url2, "second ensure returns the same URL (cache hit)")
+    check(dl.downloads == 1, "second ensure did NOT re-download (offline reuse)")
+    check(store.isCached(spec), "model now reports cached")
+
+    // A truncated download is rejected, not silently accepted.
+    final class TruncDownloader: ModelDownloader {
+        func download(spec: ModelSpec, to destination: URL, report: @Sendable (Double) -> Void) async throws {
+            try Data(count: 16).write(to: destination) // far below sizeBytes/4
+        }
+    }
+    let truncSpec = ModelSpec(id: "whisper-tiny", displayName: "t", sizeBytes: 1_000_000, url: URL(string: "https://example.com/t.bin")!)
+    let truncStore = ModelStore(downloader: TruncDownloader())
+    do {
+        _ = try await truncStore.ensure(spec: truncSpec)
+        check(false, "truncated download should throw")
+    } catch let e as ModelError {
+        check(e == ModelError.incompleteDownload("whisper-tiny", expected: 1_000_000, got: 16), "truncated download surfaces an incomplete error")
+    } catch {
+        check(false, "truncated download threw wrong error: \(error)")
+    }
+} catch {
+    check(false, "model store: \(error)")
+}
+ModelsDirectory.baseDirectory = nil
+try? FileManager.default.removeItem(at: FileManager.default.temporaryDirectory.appendingPathComponent("transcriber-models-\(UUID().uuidString)", isDirectory: true))
+
+// MARK: - Phase 4: settings (lenient decode + in-memory store)
+section("settings: defaults + lenient decode + in-memory persistence")
+do {
+    let def = AppSettings()
+    check(def.transcriptionBackend == .local, "default backend is local (private)")
+    check(def.keepTranscriptAfterSummary == false, "default: transcript not kept")
+    check(def.keepAudioAfterSummary == false, "default: audio not kept")
+    check(def.summaryBackend == .openai, "default summary backend is openai")
+    check(def.whisperModel == "whisper-base", "default whisper model is base")
+
+    // Round-trip through the in-memory store (no real file touched).
+    let store = SettingsStore.inMemory()
+    var s = store.load()
+    s.transcriptionBackend = .deepgram
+    s.keepTranscriptAfterSummary = true
+    store.save(s)
+    let reloaded = store.load()
+    check(reloaded.transcriptionBackend == .deepgram, "in-memory store persists backend")
+    check(reloaded.keepTranscriptAfterSummary, "in-memory store persists keepTranscript")
+
+    // Lenient decode: an old file missing new keys still loads with defaults.
+    let oldJSON = #"{"captureMic":true,"captureSystem":true}"#.data(using: .utf8)!
+    let old = try JSONDecoder().decode(AppSettings.self, from: oldJSON)
+    check(old.captureMic && old.captureSystem, "old file: explicit keys decoded")
+    check(old.transcriptionBackend == .local, "old file: new keys fall back to defaults")
+    check(old.summaryBackend == .openai, "old file: summary backend defaults")
+} catch {
+    check(false, "settings: \(error)")
+}
+
+// MARK: - Phase 4: LLM summarizer over a fake HTTP client
+section("llm: summarizer uses HTTP seam + shared parser")
+final class FakeHTTP: HTTPClient {
+    let status: Int
+    let body: Data
+    var lastRequest: HTTPRequest?
+    init(status: Int, body: Data) { self.status = status; self.body = body }
+    func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+        lastRequest = request
+        return HTTPResponse(statusCode: status, body: body)
+    }
+}
+do {
+    let openaiBody = Data(#"{"choices":[{"message":{"content":"{\"overall\":\"oai\",\"key_points\":[\"k\"],\"decisions\":[],\"action_items\":[]}"}}]}"#.utf8)
+    let oai = OpenAISummarizer(model: "gpt-4o-mini", apiKey: { "test-key" }, http: FakeHTTP(status: 200, body: openaiBody))
+    let oaiOut = try await oai.summarize(segments: [TranscriptSegment(speaker: "S1", text: "hi")], title: "T")
+    check(oaiOut.overall == "oai", "OpenAI summarizer parses the summary")
+    check(oaiOut.keyPoints == ["k"], "OpenAI summarizer parses key points")
+
+    // Missing key → clear error, no network.
+    let noKey = OpenAISummarizer(model: "gpt-4o-mini", apiKey: { nil }, http: FakeHTTP(status: 200, body: Data()))
+    do {
+        _ = try await noKey.summarize(segments: [], title: "T")
+        check(false, "missing key should throw")
+    } catch let e as LLMError {
+        check(e.message.contains("OpenAI"), "missing OpenAI key surfaces a clear error")
+    } catch {
+        check(false, "missing key threw wrong error: \(error)")
+    }
+
+    let anthBody = Data(#"{"content":[{"text":"{\"overall\":\"anth\",\"key_points\":[\"k2\"]}"}]}"#.utf8)
+    let anth = AnthropicSummarizer(model: "claude-3-5-haiku-latest", apiKey: { "ak" }, http: FakeHTTP(status: 200, body: anthBody))
+    let anthOut = try await anth.summarize(segments: [TranscriptSegment(speaker: "S1", text: "hi")], title: "T")
+    check(anthOut.overall == "anth", "Anthropic summarizer parses the summary")
+    check(anthOut.keyPoints == ["k2"], "Anthropic summarizer parses key points")
+} catch {
+    check(false, "llm: \(error)")
+}
+
+// MARK: - Phase 4: Deepgram transcriber parses diarized words
+section("cloud: deepgram transcriber parses speaker words")
+do {
+    let body = Data(#"""
+    {"results":{"channels":[{"alternatives":[{"transcript":"hi there",
+      "words":[
+        {"word":"hi","start":0.0,"dur":0.5,"speaker":"1"},
+        {"word":"there","start":0.6,"dur":0.5,"speaker":"1"},
+        {"word":"hello","start":3.0,"dur":0.5,"speaker":"2"}
+      ]}]}]}}
+    """#.utf8)
+    let http = FakeHTTP(status: 200, body: body)
+    let dg = DeepgramTranscriber(apiKey: { "dg-key" }, http: http)
+    let dgFile = FileManager.default.temporaryDirectory.appendingPathComponent("dg-audio-\(UUID().uuidString).wav")
+    try Data(count: 1024).write(to: dgFile)
+    defer { try? FileManager.default.removeItem(at: dgFile) }
+    let segs = try await dg.transcribe(audio: CapturedAudio(fileURLs: [.mic: dgFile]), language: "en")
+    check(segs.count == 2, "groups consecutive words into 2 speaker segments")
+    check(segs[0].text == "hi there", "first segment joins same-speaker words")
+    check(segs[1].text == "hello", "second segment is the other speaker")
+    check(segs[0].startOffset == 0.0 && segs[0].endOffset == 1.1, "first segment timing spans its words")
+
+    // Missing key → clear error.
+    let noKeyDg = DeepgramTranscriber(apiKey: { nil }, http: FakeHTTP(status: 200, body: Data()))
+    do {
+        _ = try await noKeyDg.transcribe(audio: CapturedAudio(), language: "en")
+        check(false, "missing key should throw")
+    } catch let e as DeepgramError {
+        check(e.message.contains("Deepgram"), "missing Deepgram key surfaces a clear error")
+    } catch {
+        check(false, "missing key threw wrong error: \(error)")
+    }
+} catch {
+    check(false, "deepgram: \(error)")
+}
 
 // MARK: - Report
 print("\n\(passed) passed, \(failed) failed")

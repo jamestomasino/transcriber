@@ -5,28 +5,52 @@ from Zoom / Slack / Teams), transcribes it with speaker identification, generate
 a structured summary, and then **deletes the audio and the raw transcript,
 keeping only the summary.**
 
-> **Status:** Phase 3 (audio capture) in progress. The build, test harness,
-> pure core model + engine, and the mic + system-audio capture path are in
-> place and green (59 tests). A live level meter and a permission / capture
-> status card are wired into the UI. Transcription, summarization, the full
-> UI, and retention land in later phases — see [PLAN.md](PLAN.md).
+> **Status:** Phase 4 (post-stop pipeline) in progress. The build, test
+> harness, pure core model + engine, the mic + system-audio capture path, and
+> the **transcribe → diarize → summarize → retention** pipeline are in place
+> and green (114 tests). Transcription is pluggable — **local Apple Speech**
+> (private, on-device, no key) by default, or **Deepgram** for accurate speaker
+> ID — and summarization runs on **OpenAI** or **Anthropic**. A
+> download-on-demand model store is in place for local-model backends. A live
+> level meter and a permission / capture status card are wired into the UI.
+> See [PLAN.md](PLAN.md).
 
-## Features (target)
+## Features
 
 - Start / stop meeting recording, with an optional meeting name.
 - Capture the microphone and the system audio simultaneously.
 - Transcribe with speaker identification (diarization).
 - Generate a structured summary: overall, key points, decisions, action items.
-- Save only the summary; delete the audio and transcript by default.
-- Preferences: choose audio input/output devices and where summaries are saved.
+- Save only the summary; delete the audio and transcript by default
+  (`RetentionPolicy`; opt-in "keep transcript / keep audio" flags on `AppSettings`).
+- Pluggable transcription + summarization backends (see Backends below).
+
+## Backends
+
+Transcription and summarization are **pluggable**, selected via `AppSettings`
+(the Settings UI is a later phase; defaults are local + OpenAI):
+
+| Stage        | Backend            | Notes                                                        |
+| ------------ | ------------------ | ------------------------------------------------------------ |
+| Transcribe   | **Apple Speech**   | On-device, private, no API key, no network. Default.         |
+| Transcribe   | **Deepgram**       | Nova-2 with diarization; accurate speaker ID. Needs a key.   |
+| Summarize    | **OpenAI**         | Any chat model. Needs a key.                                 |
+| Summarize    | **Anthropic**      | Any Claude model. Needs a key.                               |
+
+API keys are stored in the macOS Keychain (never in settings or on disk in
+plain text). The download-on-demand model store (`ModelStore` + a Whisper
+catalog) is in place for backends that need a local model; the current local
+path uses Apple's on-device Speech and downloads nothing.
 
 ## Requirements
 
 - macOS 14+ (Apple Silicon or Intel), built with the **Command Line Tools only**
   (no full Xcode required).
-- Microphone access (granted on first recording).
-- A transcription/summarization backend (cloud API key, or local Speech) —
-  configured in a later phase.
+- Microphone access (granted on first recording) and, for the local path,
+  Speech Recognition (System Settings → Privacy & Security).
+- A summarization backend: an OpenAI or Anthropic API key (stored in the
+  Keychain via `Keychain.set`). A Deepgram key is optional, only for the
+  cloud transcription backend.
 
 ## Build & run
 
@@ -43,8 +67,14 @@ an older installed SDK — this is expected and not a failure.
 ## Project layout
 
 ```
-Sources/Core/   Pure, AppKit-free core: model, engine, view model (testable)
-Sources/App/    SwiftUI/AppKit shell (window + menu bar)
+Sources/Core/   Pure, AppKit-free core (Foundation only): model, engine, view
+                model, pipeline (transcribe → diarize → summarize), settings,
+                retention, model store, summary parser, and the pluggable
+                LLM / Deepgram backends. Fully unit-testable.
+Sources/App/    SwiftUI/AppKit shell (window + menu bar), plus the platform
+                pieces that Core stays pure of: real audio capture (AVFoundation),
+                local Speech transcription, the URLSession HTTP + model
+                downloaders, Keychain-backed API keys, and the processor factory.
 Tests/          Custom assertion-based test harness (no XCTest)
 build.sh        swiftc-only build (app + tests), with SDK fallback
 PLAN.md         Full design, architecture, roadmap, and open decisions

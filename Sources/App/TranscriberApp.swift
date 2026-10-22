@@ -5,8 +5,20 @@ import AppKit
 struct TranscriberApp: App {
     /// Single shared view model so the main window and the (future) menu-bar
     /// item always agree on state. Wired to the real AVFoundation +
-    /// ScreenCaptureKit capture.
-    @StateObject private var vm = TranscriberViewModel(capture: AVAudioCapture())
+    /// ScreenCaptureKit capture and the real pipeline processor (chosen from
+    /// the user's settings).
+    @StateObject private var vm: TranscriberViewModel
+
+    init() {
+        let settingsStore = SettingsStore(url: Self.settingsURL)
+        let settings = settingsStore.load()
+        _vm = StateObject(wrappedValue: TranscriberViewModel(
+            capture: AVAudioCapture(),
+            processor: ProcessorFactory.make(settings: settings),
+            settings: settings,
+            settingsStore: settingsStore
+        ))
+    }
 
     var body: some Scene {
         WindowGroup(id: "main") {
@@ -20,5 +32,12 @@ struct TranscriberApp: App {
                     .keyboardShortcut("q")
             }
         }
+    }
+
+    static var settingsURL: URL {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        return appSupport.appendingPathComponent("Transcriber", isDirectory: true)
+            .appendingPathComponent("settings.json")
     }
 }

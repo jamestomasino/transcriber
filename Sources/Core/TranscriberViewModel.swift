@@ -26,27 +26,41 @@ public final class TranscriberViewModel: ObservableObject {
     @Published public private(set) var activeMeeting: Meeting?
     @Published public private(set) var levels: [AudioSource: Float] = [:]
     @Published public private(set) var captureStatus: [AudioSource: AudioCaptureError] = [:]
+    /// The pipeline stage currently running (for the detail view's progress
+    /// bar). nil when not processing.
+    @Published public private(set) var processingProgress: ProcessingProgress?
+    /// A human-readable processing error, when the last pipeline run failed.
+    @Published public private(set) var processingError: String?
 
     private let engine: MeetingEngine
     private let capture: AudioCapture
+    /// The post-stop pipeline (transcribe → diarize → summarize). Injected so
+    /// tests can use a `FakeProcessor` and the app can supply a real backend.
+    /// Defaults to `NoopProcessor` (does nothing) so the start/stop flow works
+    /// before a backend is chosen.
+    private let processor: any MeetingProcessor
+    /// User preferences (retention, backend, model, …).
+    public var settings: AppSettings
+    private let settingsStore: SettingsStore?
     private var session: AudioCaptureSession?
     /// The meeting id whose capture session is in flight (so a stray stop
     /// can't be misrouted to the wrong meeting).
     private var sessionMeetingID: UUID?
-
-    /// `process` runs the post-stop pipeline (transcribe → summarize → delete
-    /// audio). Injected so tests can stub it and the app can supply the real
-    /// one. Defaults to a no-op until Phase 3.
-    private let process: (Meeting) async -> Void
+    /// Guards against concurrent pipeline runs for the same meeting.
+    private var processingIDs: Set<UUID> = []
 
     public init(
         engine: MeetingEngine = MeetingEngine(),
         capture: AudioCapture,
-        process: @escaping (Meeting) async -> Void = { _ in }
+        processor: any MeetingProcessor = NoopProcessor(),
+        settings: AppSettings = AppSettings(),
+        settingsStore: SettingsStore? = nil
     ) {
         self.engine = engine
         self.capture = capture
-        self.process = process
+        self.processor = processor
+        self.settings = settings
+        self.settingsStore = settingsStore
         self.meetings = engine.recent
         self.activeMeeting = engine.active
     }
@@ -138,15 +152,94 @@ public final class TranscriberViewModel: ObservableObject {
         self.sessionMeetingID = nil
         self.captureStatus = self.capture.status
 
-        // Kick off the post-stop pipeline.
-        if let m = self.engine.meeting(id: id) {
-            await self.process(m)
-        }
+        // Kick off the post-stop pipeline (transcribe → summarize → retention).
+        await self.runPipeline(for: id)
     }
 
     /// UI-facing: stop the active meeting (returns immediately).
     public func stop() {
         Task { await self.stopAsync() }
+    }
+
+    // MARK: - Pipeline
+    //
+    // The post-stop pipeline. Runs the injected `MeetingProcessor`, then
+    // records the result on the engine, applies retention (deletes the raw
+    // audio + transcript per settings), and persists. On failure it keeps the
+    // artifacts (so the user can retry) and surfaces the error.
+
+    /// Run the pipeline for a specific meeting. Awaitable so tests drive it.
+    @discardableResult
+    public func runPipeline(for id: UUID) async -> Bool {
+        guard let meeting = engine.meeting(id: id) else { return false }
+        guard !processingIDs.contains(id) else { return false }
+        processingIDs.insert(id)
+        defer { processingIDs.remove(id) }
+
+        processingError = nil
+        processingProgress = ProcessingProgress(stage: .transcribing, fraction: 0)
+
+        do {
+            let result = try await processor.process(
+                meeting: meeting,
+                audio: CapturedAudio(fileURLs: meeting.audioFileURLs),
+                report: { [weak self] p in
+                    Task { @MainActor in self?.processingProgress = p }
+                }
+            )
+
+            // Record the transcript (so it's inspectable before summarizing),
+            // then mark summarized (clearing it unless retention keeps it).
+            engine.setTranscript(id: id, segments: result.segments)
+            let policy = RetentionPolicy(settings: settings)
+            engine.markSummarized(
+                id: id,
+                summary: result.summary,
+                speakerCount: result.speakerCount,
+                keepTranscript: policy.keepTranscript
+            )
+
+            // Retention side effect: delete the raw audio + transcript file per
+            // settings. This is the product's core promise (keep only the
+            // summary), made testable via the pure `RetentionPolicy` decision.
+            let toDelete = policy.artifactsToDelete(for: meeting)
+            for url in toDelete { try? FileManager.default.removeItem(at: url) }
+            if !policy.keepAudio {
+                engine.clearAudioFiles(id: id)
+            }
+
+            processingProgress = nil
+            self.meetings = engine.recent
+            self.activeMeeting = engine.active
+            self.settingsStore?.save(settings)
+            return true
+        } catch {
+            engine.fail(id: id)
+            processingProgress = nil
+            processingError = (error as? LocalizedError)?.errorDescription
+                ?? error.localizedDescription
+            self.meetings = engine.recent
+            self.activeMeeting = engine.active
+            return false
+        }
+    }
+
+    /// Retry a failed meeting's pipeline.
+    @discardableResult
+    public func retry(id: UUID) async -> Bool {
+        guard let m = engine.meeting(id: id), m.status == .failed else { return false }
+        engine.retry(id: id)
+        self.meetings = engine.recent
+        self.activeMeeting = engine.active
+        return await runPipeline(for: id)
+    }
+
+    // MARK: - Settings
+
+    /// Update a setting and persist it.
+    public func updateSettings(_ mutate: (inout AppSettings) -> Void) {
+        mutate(&settings)
+        settingsStore?.save(settings)
     }
 
     // MARK: - Live levels (driven by the UI's timer)
