@@ -8,7 +8,7 @@ only the **summary** — deleting the audio and the transcript.
 > **Implementation progress (as of the meeting detail pane, orphan sweep, notifications, and long-meeting hardening).**
 > Phases 0–5 plus the Settings window, menu bar, the meeting detail pane, the
 > startup orphan sweep, **notifications**, and **long-meeting hardening** are
-> built and green (249 tests, `bash build.sh test`):
+> built and green (259 tests, `bash build.sh test`):
 > the pure core model + engine, mic +
 > system audio capture, the **transcribe → diarize → summarize → retention**
 > pipeline (pluggable Apple Speech / Deepgram + OpenAI / Anthropic), **durable
@@ -47,7 +47,13 @@ only the **summary** — deleting the audio and the transcript.
 > 429 / 5xx / network-timeout failures up to a cap while never retrying 4xx
 > client errors — the decision is pure Core and tested with a scripted fake, the
 > backoff delay is injectable so the suite stays instant, and the App wires the
-> real client + retry into `ProcessorFactory` by default. Remaining: the
+> real client + retry into `ProcessorFactory` by default. The **transcript cap**
+> is also done: both LLM summarizers fit the transcript into a generous
+> `Summary.defaultTranscriptBudget` (120k chars) via the pure
+> `Summary.fitTranscript`, which keeps the opening (agenda/context) and the
+> closing (decisions/action items) and marks the omission in between — so a very
+> long recording's prompt stays inside the model's context window and cost
+> budget instead of failing the summary with a 400. Remaining: the
 > Phase 7 onboarding polish and a live end-to-end run with a real key. Note:
 > the detail pane's on-screen rendering has been verified only
 > indirectly — the app launches with seeded data and its window opens, and the
@@ -652,7 +658,7 @@ each; tell me where you'd differ.
 |---|---|---|
 | **System-audio capture** (permission + API) | Can't capture the meeting | Default to Screen Recording; document the virtual-device fallback; onboarding explains the permission. |
 | **Speaker diarization quality** | Wrong/mis-merged speakers | Use a provider with native diarization; keep speaker labels as "Speaker N" until names are known; make diarization pluggable. |
-| **Long meetings** (hours) | Big files, slow/costly ASR, timeouts | Stream/progress reporting; chunked upload for cloud; generous timeouts + retry; cap or warn on very long recordings. |
+| **Long meetings** (hours) | Big files, slow/costly ASR, timeouts | Stream/progress reporting; chunked upload for cloud; generous timeouts + retry; cap or warn on very long recordings. **Done:** 300s timeout + `RetryingHTTPClient`; transcript cap (`Summary.fitTranscript`); progress via `ProcessingProgress`. **Remaining:** chunked cloud upload; user-facing long-recording warning. |
 | **Destructive retention** | User loses audio/transcript they wanted | Toggles default per requirement but easily flipped; "Keep" path; delete-meeting confirmation. |
 | **Privacy (cloud)** | Audio leaves the machine | Offer local mode; make the choice explicit in Settings; state it in onboarding. |
 | **SDK/SwiftUI macro build gotcha** | Build fails on some machines | Keep the base's SDK-fallback verbatim. |

@@ -760,6 +760,45 @@ do {
     check(false, "llm: \(error)")
 }
 
+// MARK: - Phase 7: long-recording transcript cap (pure)
+section("long recording: transcript cap keeps the LLM prompt bounded")
+check(Summary.defaultTranscriptBudget > 60_000, "default transcript budget is generous")
+
+// Short transcripts pass through unchanged.
+let capShort = "Alice: kickoff\nBob: great"
+check(Summary.fitTranscript(capShort) == capShort, "short transcript is untouched")
+check(Summary.fitTranscript(capShort, budget: 10_000) == capShort, "short transcript untouched under an explicit budget")
+
+// A very long transcript is capped to the budget, keeps the opening + closing,
+// and marks the omission in between.
+let capLong = String(repeating: "speaker line of speech\n", count: 20_000)
+let capCapped = Summary.fitTranscript(capLong, budget: 10_000)
+check(capCapped.count <= 10_000, "capped transcript is within the budget")
+check(capCapped.contains("middle of transcript omitted"), "capped transcript marks the omission")
+check(capCapped.hasPrefix("speaker line"), "capped transcript keeps the opening")
+check(capCapped.hasSuffix("speech\n"), "capped transcript keeps the closing")
+
+// The cap is applied inside the real summarizer request, not just the pure fn.
+final class CapProbeHTTP: HTTPClient {
+    var lastBody: Data?
+    func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+        lastBody = request.body
+        return HTTPResponse(statusCode: 200, body: Data(#"{"choices":[{"message":{"content":"{\"overall\":\"ok\"}"}}]}"#.utf8))
+    }
+}
+do {
+    let capProbe = CapProbeHTTP()
+    let capOai = OpenAISummarizer(model: "gpt-4o-mini", apiKey: { "k" }, http: capProbe)
+    let capBig = (0..<20_000).map { TranscriptSegment(speaker: "S\($0)", text: "a line of speech about the project") }
+    _ = try await capOai.summarize(segments: capBig, title: "Long meeting")
+    let capSent = String(data: capProbe.lastBody ?? Data(), encoding: .utf8) ?? ""
+    check(capSent.contains("middle of transcript omitted"), "summarizer request is capped for a very long transcript")
+    check(capSent.contains("S0"), "capped request keeps the opening segment")
+    check(capSent.contains("S19999"), "capped request keeps the closing segment")
+} catch {
+    check(false, "cap probe: \(error)")
+}
+
 // MARK: - Phase 4: Deepgram transcriber parses diarized words
 section("cloud: deepgram transcriber parses speaker words")
 do {

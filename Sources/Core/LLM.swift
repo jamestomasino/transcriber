@@ -41,7 +41,10 @@ public struct OpenAISummarizer: Summarizer {
         guard let key = apiKey(), !key.isEmpty else {
             throw LLMError("No OpenAI API key set. Add one in Settings → Summary.")
         }
-        let prompt = Summary.prompt(title: title, transcript: Summary.transcriptText(segments))
+        let prompt = Summary.prompt(
+            title: title,
+            transcript: Summary.fitTranscript(Summary.transcriptText(segments))
+        )
         let body: [String: Any] = [
             "model": model,
             "messages": [["role": "user", "content": prompt]],
@@ -90,7 +93,10 @@ public struct AnthropicSummarizer: Summarizer {
         guard let key = apiKey(), !key.isEmpty else {
             throw LLMError("No Anthropic API key set. Add one in Settings → Summary.")
         }
-        let prompt = Summary.prompt(title: title, transcript: Summary.transcriptText(segments))
+        let prompt = Summary.prompt(
+            title: title,
+            transcript: Summary.fitTranscript(Summary.transcriptText(segments))
+        )
         let body: [String: Any] = [
             "model": model,
             "max_tokens": 1024,

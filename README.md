@@ -11,8 +11,9 @@ keeping only the summary.**
 > **durable persistence**, a **settings window**, a **menu-bar item**, a
 > **meeting detail pane**, **completion / failure notifications**, and
 > **long-meeting hardening** (generous HTTP timeouts + retry of transient
-> failures) are all
-> green (249 tests, including
+> failures, and a transcript cap that keeps very long recordings' LLM prompts
+> bounded) are all
+> green (259 tests, including
 > integration tests that drive the real pipeline → real store → the copyable
 > text the detail pane shows, across the default-retention, retry, and
 > transcript-kept paths, plus a startup orphan sweep so per-meeting recording
@@ -69,7 +70,11 @@ keeping only the summary.**
   transient failures (rate limits, 5xx, network timeouts) up to a cap while
   never retrying 4xx client errors. The retry decision is pure Core
   (`HTTPRetryPolicy`) and tested with a scripted fake; the App wires the real
-  client + retry into the pipeline by default.
+  client + retry into the pipeline by default. Very long recordings are also
+  capped: both LLM summarizers fit the transcript into a generous budget
+  (`Summary.fitTranscript`, 120k chars) that keeps the opening and closing and
+  marks the omission, so the prompt stays inside the model's context window and
+  cost budget instead of failing the summary.
 - A **meeting detail pane**: select any meeting to read its full structured
   summary (overall, key points, decisions, action items) and the retained
   transcript (when you opted to keep it). A failed meeting shows its error and

@@ -14,6 +14,33 @@ public enum Summary {
         segments.map { "\($0.speaker): \($0.text)" }.joined(separator: "\n")
     }
 
+    /// The character budget a transcript is fit into before it goes to the LLM.
+    /// Generous on purpose: a 1–2 hour meeting's transcript (~40–90k chars)
+    /// passes through untouched, while a very long recording (hours) is capped
+    /// so the prompt stays inside the model's context window and its cost —
+    /// instead of failing the summary outright with a 400. This is the "cap on
+    /// very long recordings" half of the long-meeting risk.
+    public static let defaultTranscriptBudget = 120_000
+
+    /// Fit a transcript into a character budget, keeping the **opening** (where
+    /// the agenda and context live) and the **closing** (where decisions and
+    /// action items usually land), and marking the omission in between. Short
+    /// transcripts (within the budget) are returned unchanged. Pure and
+    /// deterministic, so it is unit-testable and the head/tail split is stable.
+    public static func fitTranscript(
+        _ transcript: String,
+        budget: Int = defaultTranscriptBudget
+    ) -> String {
+        if transcript.count <= budget { return transcript }
+        let marker = "\n…(middle of transcript omitted)…\n"
+        let available = max(budget - marker.count, 1)
+        let headLen = (available * 60) / 100
+        let tailLen = available - headLen
+        let head = String(transcript.prefix(headLen))
+        let tail = String(transcript.suffix(tailLen))
+        return head + marker + tail
+    }
+
     /// The user-facing prompt. Asks for a compact JSON summary.
     public static func prompt(title: String, transcript: String) -> String {
         """
