@@ -169,6 +169,70 @@ public final class SettingsStore: @unchecked Sendable {
     }
 }
 
+// MARK: - MeetingNotification (Core, pure)
+//
+// Decides, given a meeting's terminal state + the user's settings, what
+// notification (if any) to post when a meeting finishes. Pure: it returns the
+// *content* to post (title / body / a severity), not the platform call — the
+// App layer owns `UNUserNotificationCenter`. This is the same posture as
+// `RetentionPolicy`: a product decision made testable without AppKit.
+//
+// Why it exists: a meeting started from the menu bar runs headless. When it
+// finishes (or fails) the user may be in another app and has no other cue that
+// the summary is ready — so the app posts a notification, gated by the
+// `notifyOnSummary` setting.
+
+/// What a notification should say about a finished meeting.
+public struct MeetingNotification: Equatable, Sendable {
+    public let title: String
+    public let body: String
+    /// Whether the outcome is an error (a failed pipeline). The App layer uses
+    /// this to pick an alert style / sound; it has no effect on the copy.
+    public let isError: Bool
+
+    public init(title: String, body: String, isError: Bool) {
+        self.title = title
+        self.body = body
+        self.isError = isError
+    }
+}
+
+/// The pure decision: given a meeting + settings, the notification to post, or
+/// `nil` when the user has disabled notifications or there is nothing to say.
+public enum MeetingNotificationPolicy {
+    /// `nil` when `notifyOnSummary` is off. A meeting that reached `.summarized`
+    /// posts a "ready" note with the overall line; a `.failed` meeting posts an
+    /// error note with the reason (if known) so the user knows to retry.
+    /// Meetings still `.recording` or `.processing` post nothing — they are not
+    /// terminal, so a notification would be premature.
+    public static func notification(
+        for meeting: Meeting,
+        errorDescription: String?,
+        settings: AppSettings
+    ) -> MeetingNotification? {
+        guard settings.notifyOnSummary else { return nil }
+
+        let title = meeting.title.isEmpty ? "Meeting" : meeting.title
+
+        switch meeting.status {
+        case .summarized:
+            let overall = meeting.summary?.overall.trimmingCharacters(in: .whitespacesAndNewlines)
+            let body = (overall?.isEmpty ?? true)
+                ? "Summary ready."
+                : "Summary ready: \(overall!)"
+            return MeetingNotification(title: title, body: body, isError: false)
+        case .failed:
+            let detail = errorDescription?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let body = (detail?.isEmpty ?? true)
+                ? "This meeting failed. Open it to retry."
+                : "This meeting failed: \(detail!). Open it to retry."
+            return MeetingNotification(title: title, body: body, isError: true)
+        case .recording, .processing:
+            return nil
+        }
+    }
+}
+
 // MARK: - RetentionPolicy (Core, pure)
 //
 // Decides, given a meeting + settings, which on-disk artifacts to delete after

@@ -5,9 +5,10 @@ captures Zoom / Slack / Teams conversations), then turns that recording into a
 **transcript with identified speakers**, writes a **meeting summary**, and keeps
 only the **summary** — deleting the audio and the transcript.
 
-> **Implementation progress (as of the meeting detail pane + orphan sweep).**
-> Phases 0–5 plus the Settings window, menu bar, the meeting detail pane, and
-> the startup orphan sweep are built and green (197 tests, `bash build.sh test`):
+> **Implementation progress (as of the meeting detail pane, orphan sweep, and notifications).**
+> Phases 0–5 plus the Settings window, menu bar, the meeting detail pane, the
+> startup orphan sweep, and **notifications** are built and green
+> (220 tests, `bash build.sh test`):
 > the pure core model + engine, mic +
 > system audio capture, the **transcribe → diarize → summarize → retention**
 > pipeline (pluggable Apple Speech / Deepgram + OpenAI / Anthropic), **durable
@@ -28,9 +29,17 @@ only the **summary** — deleting the audio and the transcript.
 > `RecordingsDirectory.orphanDirectories(liveIDs:)` decision at launch to clear
 > any that outlived their meeting (a live, non-empty dir is always kept so a
 > failed meeting's audio stays retryable) — so no empty directories leak into
-> `~/Library/Application Support`. Remaining: the Phase 6–7 polish (onboarding,
-> notifications, long-meeting hardening) and a live end-to-end run with a real
-> key. Note: the detail pane's on-screen rendering has been verified only
+> `~/Library/Application Support`. **Notifications** are done: the previously
+> dead `notifyOnSummary` toggle now drives a real macOS banner — a pure
+> `MeetingNotificationPolicy.notification(for:errorDescription:settings:)`
+> decision in Core (nothing for `.recording`/`.processing`, a "Summary ready:
+> {overall}" note on success, a "This meeting failed: {reason}…" error note on
+> failure, and nothing at all when the toggle is off) feeds a `notifier` seam
+> on the view model, and the App layer posts it via `UserNotifications`
+> (requesting authorization once at launch). The decision is pure Core and
+> tested; the App owns the platform framework. Remaining: the Phase 6–7
+> polish (onboarding, long-meeting hardening) and a live end-to-end run with a
+> real key. Note: the detail pane's on-screen rendering has been verified only
 > indirectly — the app launches with seeded data and its window opens, and the
 > copyable text it shows is covered by
 > the integration test — but the live display was asleep during the session, so

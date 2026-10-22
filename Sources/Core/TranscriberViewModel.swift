@@ -46,6 +46,13 @@ public final class TranscriberViewModel: ObservableObject {
     /// `AppSettings` and returns a processor, so Core stays free of Keychain /
     /// URLSession. The App wires it to `ProcessorFactory.make(settings:)`.
     private let processorFactory: ((AppSettings) -> any MeetingProcessor)?
+    /// Posts a notification when a meeting reaches a terminal state (summarized
+    /// or failed). Injected so tests can use a recording fake and the app can
+    /// wire a real `UNUserNotificationCenter` poster. Pure: it only takes the
+    /// decided `MeetingNotification` (title / body / severity) — it owns the
+    /// platform call, not the decision. `nil` posts nothing, so the test fakes
+    /// and any environment without a poster keep working.
+    private let notifier: ((MeetingNotification) -> Void)?
     /// User preferences (retention, backend, model, …). Published so the
     /// Settings UI reflects changes live and re-renders on update.
     @Published public var settings: AppSettings
@@ -69,12 +76,14 @@ public final class TranscriberViewModel: ObservableObject {
         settings: AppSettings = AppSettings(),
         settingsStore: SettingsStore? = nil,
         meetingStore: MeetingStore? = nil,
-        processorFactory: ((AppSettings) -> any MeetingProcessor)? = nil
+        processorFactory: ((AppSettings) -> any MeetingProcessor)? = nil,
+        notifier: ((MeetingNotification) -> Void)? = nil
     ) {
         self.engine = engine
         self.capture = capture
         self.processor = processor
         self.processorFactory = processorFactory
+        self.notifier = notifier
         self.settings = settings
         self.settingsStore = settingsStore
         self.meetingStore = meetingStore
@@ -284,6 +293,11 @@ public final class TranscriberViewModel: ObservableObject {
             self.activeMeeting = engine.active
             self.settingsStore?.save(settings)
             self.persist()
+            // A headless (menu-bar) meeting just finished: tell the user the
+            // summary is ready. Pure decision in MeetingNotificationPolicy; the
+            // poster owns the platform call. No-op when the user disabled
+            // notifications or no notifier is wired.
+            self.notifyTerminal(id: id, errorDescription: nil)
             return true
         } catch {
             engine.fail(id: id)
@@ -293,8 +307,23 @@ public final class TranscriberViewModel: ObservableObject {
             self.meetings = engine.recent
             self.activeMeeting = engine.active
             self.persist()
+            // The meeting failed — surface it so the user knows to retry, with
+            // the reason when we have one.
+            self.notifyTerminal(id: id, errorDescription: processingError)
             return false
         }
+    }
+
+    /// Post a notification for a meeting that just reached a terminal state
+    /// (summarized or failed), if the user enabled notifications and a poster
+    /// is wired. The *content* decision is pure (`MeetingNotificationPolicy`);
+    /// this only performs the side effect (calling the injected poster).
+    private func notifyTerminal(id: UUID, errorDescription: String?) {
+        guard let meeting = engine.meeting(id: id),
+              let note = MeetingNotificationPolicy.notification(
+                  for: meeting, errorDescription: errorDescription, settings: settings
+              ) else { return }
+        notifier?(note)
     }
 
     /// Retry a failed meeting's pipeline.

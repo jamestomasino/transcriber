@@ -1202,6 +1202,141 @@ do {
     check(false, "orphan-sweep: \(error)")
 }
 
+// MARK: - Phase 7.2: notifications (pure decision)
+section("notification: pure decision (MeetingNotificationPolicy)")
+do {
+    func mk(_ title: String, _ status: MeetingStatus, summary: MeetingSummary? = nil) -> Meeting {
+        Meeting(title: title, status: status, startedAt: t0, createdAt: t0,
+                lastActivityAt: t0, summary: summary)
+    }
+
+    let ready = MeetingNotificationPolicy.notification(
+        for: mk("All Hands", .summarized, summary: MeetingSummary(overall: "Shipped v1.")),
+        errorDescription: nil, settings: AppSettings()
+    )
+    check(ready?.title == "All Hands", "ready: title is the meeting title")
+    check(ready?.body == "Summary ready: Shipped v1.", "ready: body carries the overall line")
+    check(ready?.isError == false, "ready: not flagged as an error")
+
+    let readyBlank = MeetingNotificationPolicy.notification(
+        for: mk("All Hands", .summarized, summary: MeetingSummary(overall: "   ")),
+        errorDescription: nil, settings: AppSettings()
+    )
+    check(readyBlank?.body == "Summary ready.", "ready: blank overall falls back to a plain note")
+
+    let noTitle = MeetingNotificationPolicy.notification(
+        for: mk("", .summarized, summary: MeetingSummary(overall: "ok")),
+        errorDescription: nil, settings: AppSettings()
+    )
+    check(noTitle?.title == "Meeting", "blank meeting title falls back to 'Meeting'")
+
+    let failed = MeetingNotificationPolicy.notification(
+        for: mk("Sync", .failed),
+        errorDescription: "whisper model not found", settings: AppSettings()
+    )
+    check(failed?.isError == true, "failed: flagged as an error")
+    check(failed?.body.contains("whisper model not found") == true,
+          "failed: body carries the reason")
+    check(failed?.body.contains("retry") == true, "failed: body points the user to retry")
+
+    let failedNoReason = MeetingNotificationPolicy.notification(
+        for: mk("Sync", .failed), errorDescription: nil, settings: AppSettings()
+    )
+    check(failedNoReason?.body.contains("retry") == true,
+          "failed (no reason): still says to retry")
+
+    check(MeetingNotificationPolicy.notification(
+        for: mk("Live", .recording), errorDescription: nil, settings: AppSettings()
+    ) == nil, "recording: no notification (not terminal)")
+    check(MeetingNotificationPolicy.notification(
+        for: mk("Busy", .processing), errorDescription: nil, settings: AppSettings()
+    ) == nil, "processing: no notification (not terminal)")
+
+    let off = AppSettings(notifyOnSummary: false)
+    check(MeetingNotificationPolicy.notification(
+        for: mk("All Hands", .summarized, summary: MeetingSummary(overall: "x")),
+        errorDescription: nil, settings: off
+    ) == nil, "notifyOnSummary off: no notification even when summarized")
+}
+
+// MARK: - Phase 7.2: notifications (VM posts on terminal states)
+section("notification: VM posts when a meeting finishes or fails")
+do {
+    final class NotifRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _notes: [MeetingNotification] = []
+        var notes: [MeetingNotification] { lock.lock(); defer { lock.unlock() }; return _notes }
+        func add(_ n: MeetingNotification) { lock.lock(); _notes.append(n); lock.unlock() }
+    }
+
+    // --- success → exactly one "ready" notification ---
+    let okDir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("transcriber-notif-ok-\(UUID().uuidString)")
+    RecordingsDirectory.baseDirectory = { okDir }
+    let okFile = okDir.appendingPathComponent("meetings.json")
+    let okRec = NotifRecorder()
+    let okVM = TranscriberViewModel(
+        capture: RecordingAudioCapture(directory: okDir),
+        processor: FakeProcessor(result: ProcessedResult(
+            segments: [TranscriptSegment(speaker: "A", text: "hi")],
+            summary: MeetingSummary(overall: "Discussed the roadmap.")
+        )),
+        settings: AppSettings(),
+        settingsStore: SettingsStore.inMemory(),
+        meetingStore: MeetingStore(url: okFile),
+        notifier: { okRec.add($0) }
+    )
+    let okM = await okVM.startAsync(title: "Notify me")
+    await okVM.stopAsync()
+    check(okVM.meetings.first(where: { $0.id == okM.id })?.status == .summarized, "success: meeting summarized")
+    check(okRec.notes.count == 1, "success: exactly one notification posted")
+    check(okRec.notes.first?.isError == false, "success: notification is not an error")
+    check(okRec.notes.first?.body.contains("roadmap") == true, "success: body carries the summary line")
+    check(okRec.notes.first?.title == "Notify me", "success: notification titled with the meeting")
+
+    // --- failure → exactly one error notification with the reason ---
+    let badDir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("transcriber-notif-bad-\(UUID().uuidString)")
+    RecordingsDirectory.baseDirectory = { badDir }
+    let badFile = badDir.appendingPathComponent("meetings.json")
+    let badRec = NotifRecorder()
+    let badVM = TranscriberViewModel(
+        capture: RecordingAudioCapture(directory: badDir),
+        processor: FakeProcessor(shouldThrow: ModelError.notFound("whisper-base")),
+        settings: AppSettings(),
+        settingsStore: SettingsStore.inMemory(),
+        meetingStore: MeetingStore(url: badFile),
+        notifier: { badRec.add($0) }
+    )
+    let badM = await badVM.startAsync(title: "Will break")
+    await badVM.stopAsync()
+    check(badVM.meetings.first(where: { $0.id == badM.id })?.status == .failed, "failure: meeting failed")
+    check(badRec.notes.count == 1, "failure: exactly one notification posted")
+    check(badRec.notes.first?.isError == true, "failure: notification flagged as an error")
+    check(badRec.notes.first?.body.contains("retry") == true, "failure: body points to retry")
+
+    // --- notifyOnSummary off → no notification even on success ---
+    let offDir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("transcriber-notif-off-\(UUID().uuidString)")
+    RecordingsDirectory.baseDirectory = { offDir }
+    let offFile = offDir.appendingPathComponent("meetings.json")
+    let offRec = NotifRecorder()
+    let offVM = TranscriberViewModel(
+        capture: RecordingAudioCapture(directory: offDir),
+        processor: FakeProcessor(),
+        settings: AppSettings(notifyOnSummary: false),
+        settingsStore: SettingsStore.inMemory(),
+        meetingStore: MeetingStore(url: offFile),
+        notifier: { offRec.add($0) }
+    )
+    let offM = await offVM.startAsync(title: "Quiet")
+    await offVM.stopAsync()
+    check(offVM.meetings.first(where: { $0.id == offM.id })?.status == .summarized, "off: meeting still summarized")
+    check(offRec.notes.isEmpty, "off: no notification posted when notifyOnSummary is off")
+} catch {
+    check(false, "notification: \(error)")
+}
+
 // MARK: - Report
 print("\n\(passed) passed, \(failed) failed")
 if failed > 0 {

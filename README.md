@@ -5,11 +5,12 @@ from Zoom / Slack / Teams), transcribes it with speaker identification, generate
 a structured summary, and then **deletes the audio and the raw transcript,
 keeping only the summary.**
 
-> **Status:** Phase 6 (Settings UI + menu bar + detail view) in progress. The
-> build, test harness, pure core model + engine, the mic + system-audio capture
+> **Status:** The build, test harness, pure core model + engine, the mic +
+> system-audio capture
 > path, the **transcribe → diarize → summarize → retention** pipeline,
-> **durable persistence**, a **settings window**, a **menu-bar item**, and a
-> **meeting detail pane** are in place and green (197 tests, including
+> **durable persistence**, a **settings window**, a **menu-bar item**, a
+> **meeting detail pane**, and **completion / failure notifications** are all
+> green (220 tests, including
 > integration tests that drive the real pipeline → real store → the copyable
 > text the detail pane shows, across the default-retention, retry, and
 > transcript-kept paths, plus a startup orphan sweep so per-meeting recording
@@ -54,6 +55,12 @@ keeping only the summary.**
   on the next meeting without a relaunch.
 - A **menu-bar item** with a live Start / Stop, so a meeting can be started or
   stopped without the main window focused.
+- **Completion / failure notifications**: when a meeting finishes (or fails)
+  while you're in the menu bar, a macOS banner announces it — "Summary ready:
+  {overall}" on success, or the failure reason with a nudge to retry on error.
+  The decision is pure Core (`MeetingNotificationPolicy`) and tested; the App
+  layer posts it via `UserNotifications` (authorization requested once at
+  launch). Toggle it off in Settings → **Notify when a summary is ready**.
 - A **meeting detail pane**: select any meeting to read its full structured
   summary (overall, key points, decisions, action items) and the retained
   transcript (when you opted to keep it). A failed meeting shows its error and
@@ -119,7 +126,8 @@ Sources/App/    SwiftUI/AppKit shell (window + menu bar + meeting detail pane),
                 plus the platform pieces that Core stays pure of: real audio
                 capture (AVFoundation), local Speech transcription, the
                 URLSession HTTP + model downloaders, Keychain-backed API keys,
-                and the processor factory.
+                completion/failure notifications (UserNotifications), and the
+                processor factory.
 Tests/          Custom assertion-based test harness (no XCTest)
 build.sh        swiftc-only build (app + tests), with SDK fallback
 PLAN.md         Full design, architecture, roadmap, and open decisions

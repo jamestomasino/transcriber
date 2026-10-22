@@ -41,6 +41,7 @@ APP_SRC=(
   Sources/App/HTTPClient.swift
   Sources/App/LocalTranscriber.swift
   Sources/App/ProcessorFactory.swift
+  Sources/App/Notifications.swift
 )
 TEST_SRC=(
   Tests/main.swift

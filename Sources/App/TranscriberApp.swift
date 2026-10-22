@@ -23,8 +23,17 @@ struct TranscriberApp: App {
             // switching backend / model in Settings takes effect on the next
             // meeting without a relaunch. Keys are read lazily from the Keychain
             // inside the factory, so Core stays pure.
-            processorFactory: { ProcessorFactory.make(settings: $0) }
+            processorFactory: { ProcessorFactory.make(settings: $0) },
+            // A meeting started from the menu bar runs headless: post a banner
+            // when it finishes (or fails) so the user knows the summary is
+            // ready. The *decision* is pure Core; this poster owns the
+            // platform call.
+            notifier: { note in MeetingNotifications.post(note) }
         ))
+        // Ask for the banner permission once, on launch, so the first finished
+        // meeting can actually post. Idempotent — macOS won't re-prompt after
+        // the user has decided.
+        MeetingNotifications.requestAuthorization()
     }
 
     var body: some Scene {
