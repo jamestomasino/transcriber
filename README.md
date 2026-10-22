@@ -5,9 +5,11 @@ from Zoom / Slack / Teams), transcribes it with speaker identification, generate
 a structured summary, and then **deletes the audio and the raw transcript,
 keeping only the summary.**
 
-> **Status:** early scaffold (Phase 0). The build, test harness, and the pure
-> core model + engine are in place and green. Recording, transcription,
-> summarization, and the full UI land in later phases — see [PLAN.md](PLAN.md).
+> **Status:** Phase 3 (audio capture) in progress. The build, test harness,
+> pure core model + engine, and the mic + system-audio capture path are in
+> place and green (59 tests). A live level meter and a permission / capture
+> status card are wired into the UI. Transcription, summarization, the full
+> UI, and retention land in later phases — see [PLAN.md](PLAN.md).
 
 ## Features (target)
 

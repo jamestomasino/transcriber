@@ -98,6 +98,24 @@ public enum AudioCaptureError: Error, Equatable, Sendable {
     case sourceFailed(source: AudioSource, detail: String)
 }
 
+extension AudioCaptureError {
+    /// A human-readable, actionable description for the UI. Told to the user
+    /// verbatim, so it names the setting to flip and where to find it.
+    public var description: String {
+        switch self {
+        case .microphoneNotAuthorized:
+            return "Microphone access is off, so your voice isn't captured. Enable it in System Settings → Privacy & Security → Microphone, then start again."
+        case .screenRecordingNotAuthorized:
+            return "Screen Recording is off, so system audio (Zoom / Slack / Teams) isn't captured. Enable it in System Settings → Privacy & Security → Screen Recording, then start again."
+        case .noDisplayAvailable:
+            return "No display was available to capture system audio from."
+        case .sourceFailed(let source, let detail):
+            let name = source == .mic ? "Microphone" : "System audio"
+            return "\(name) could not be started: \(detail)"
+        }
+    }
+}
+
 // MARK: - Core test fake
 //
 // A trivial capture implementation for tests and for the "no real audio"

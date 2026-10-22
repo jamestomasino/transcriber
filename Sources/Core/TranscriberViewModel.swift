@@ -61,6 +61,18 @@ public final class TranscriberViewModel: ObservableObject {
 
     public func level(_ source: AudioSource) -> Float { levels[source] ?? 0 }
 
+    /// Human-readable capture problems, one per failed source, ordered mic →
+    /// system. Empty when every requested source is recording cleanly. The UI
+    /// renders this verbatim, so it doubles as the permission guidance.
+    public var captureStatusMessages: [String] {
+        [AudioSource.mic, .system]
+            .compactMap { captureStatus[$0]?.description }
+    }
+
+    /// True when at least one requested source failed to start (a partial or
+    /// total capture failure). Drives the UI's warning banner.
+    public var hasCaptureProblem: Bool { !captureStatus.isEmpty }
+
     // MARK: - Start
     //
     // `startAsync` is the awaitable core (tests drive it directly). `start` is
@@ -80,7 +92,6 @@ public final class TranscriberViewModel: ObservableObject {
             self.sessionMeetingID = meeting.id
         } catch {
             // Capture failed outright (e.g. no permission on any source).
-            self.captureStatus = capture.status
             if let active = self.engine.active, active.id == meeting.id {
                 // Nothing was recorded — fail the meeting so the user sees why.
                 self.engine.fail(id: meeting.id)
@@ -88,6 +99,11 @@ public final class TranscriberViewModel: ObservableObject {
                 self.meetings = self.engine.recent
             }
         }
+        // Always sync per-source status: a *partial* success (e.g. mic on, but
+        // Screen Recording denied) throws nothing, yet the failed source's
+        // error must still reach the UI. `capture.status` is empty when every
+        // requested source started cleanly.
+        self.captureStatus = self.capture.status
         return meeting
     }
 
@@ -152,13 +168,26 @@ public final class TranscriberViewModel: ObservableObject {
 
     // MARK: - Level metering task (started once by the app)
 
+    /// The live meter task. Stored so `startLevelMeter` is idempotent: calling
+    /// it again (e.g. SwiftUI re-fires `onAppear`) cancels the old task first
+    /// instead of stacking a second timer.
+    private var meterTask: Task<Void, Never>?
+
     /// Drives `refreshLevels` on a timer while a meeting is recording.
+    /// Idempotent — safe to call on every `onAppear`.
     public func startLevelMeter() {
-        Task {
+        meterTask?.cancel()
+        meterTask = Task {
             while !Task.isCancelled {
                 refreshLevels()
                 try? await Task.sleep(nanoseconds: 100_000_000) // 0.1s
             }
         }
+    }
+
+    /// Stop the live meter (e.g. when the window closes). No-op if not running.
+    public func stopLevelMeter() {
+        meterTask?.cancel()
+        meterTask = nil
     }
 }

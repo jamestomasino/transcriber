@@ -215,6 +215,88 @@ RecordingsDirectory.baseDirectory = nil
 try? FileManager.default.removeItem(at: FileManager.default.temporaryDirectory
     .appendingPathComponent("transcriber-vm-\(UUID().uuidString)", isDirectory: true))
 
+// MARK: - Phase 3: error descriptions are actionable
+section("capture: error descriptions")
+check(AudioCaptureError.microphoneNotAuthorized.description.contains("Microphone"),
+      "mic error names the microphone")
+check(AudioCaptureError.microphoneNotAuthorized.description.contains("Privacy & Security"),
+      "mic error points at the setting")
+check(AudioCaptureError.screenRecordingNotAuthorized.description.contains("Screen Recording"),
+      "system error names Screen Recording")
+check(AudioCaptureError.noDisplayAvailable.description.contains("display"),
+      "no-display error mentions display")
+check(AudioCaptureError.sourceFailed(source: .mic, detail: "boom").description.contains("boom"),
+      "sourceFailed carries the detail")
+check(AudioCaptureError.sourceFailed(source: .system, detail: "x").description.contains("System audio"),
+      "sourceFailed names the source")
+
+// MARK: - Phase 3: partial failure surfaces status without throwing
+//
+// A capture whose system source fails but whose mic succeeds. `start` must
+// NOT throw (the meeting still records the mic), yet the failed source's
+// error must reach the UI via `captureStatus` / `captureStatusMessages`.
+final class PartialFailureCapture: AudioCapture, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _status: [AudioSource: AudioCaptureError] = [:]
+    var status: [AudioSource: AudioCaptureError] { lock.lock(); defer { lock.unlock() }; return _status }
+    func level(_ source: AudioSource) -> Float { 0.5 }
+    func start(sources: Set<AudioSource>, directory: URL) async throws -> AudioCaptureSession {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        if sources.contains(.system) {
+            lock.lock(); _status[.system] = .screenRecordingNotAuthorized; lock.unlock()
+        }
+        return PartialSession(directory: directory, sources: sources)
+    }
+}
+
+final class PartialSession: AudioCaptureSession, @unchecked Sendable {
+    private let directory: URL
+    private let sources: Set<AudioSource>
+    private var stopped = false
+    init(directory: URL, sources: Set<AudioSource>) { self.directory = directory; self.sources = sources }
+    func stop() async throws -> CapturedAudio {
+        if stopped { return CapturedAudio() }
+        stopped = true
+        var urls: [AudioSource: URL] = [:]
+        for source in sources where source == .mic {
+            let url = directory.appendingPathComponent("mic.wav")
+            try Data().write(to: url)
+            urls[.mic] = url
+        }
+        return CapturedAudio(fileURLs: urls)
+    }
+}
+
+section("view model: partial failure surfaces status")
+RecordingsDirectory.baseDirectory = {
+    FileManager.default.temporaryDirectory
+        .appendingPathComponent("transcriber-partial-\(UUID().uuidString)", isDirectory: true)
+}
+do {
+    let pEngine = MeetingEngine(clock: clock)
+    let pCap = PartialFailureCapture()
+    let pvm = TranscriberViewModel(engine: pEngine, capture: pCap) { _ in }
+
+    let pm = await pvm.startAsync(title: "Partial")
+    // Mic succeeded, so the meeting is still recording (not failed).
+    check(pvm.isRecording, "partial failure keeps the meeting recording")
+    check(pEngine.meeting(id: pm.id)!.status == .recording, "meeting not failed on partial loss")
+    // But the failed source's error is surfaced.
+    check(pvm.hasCaptureProblem, "hasCaptureProblem is true")
+    check(pvm.captureStatus[.system] == .screenRecordingNotAuthorized, "system error recorded")
+    check(pvm.captureStatus[.mic] == nil, "mic has no error")
+    check(pvm.captureStatusMessages.count == 1, "one status message (only the failed source)")
+    check(pvm.captureStatusMessages.first!.contains("Screen Recording"), "message names the fix")
+
+    // Stopping still finalizes the mic file.
+    await pvm.stopAsync()
+    check(pEngine.meeting(id: pm.id)!.audioFileURLs[.mic] != nil, "mic file still recorded on stop")
+    check(pEngine.meeting(id: pm.id)!.audioFileURLs[.system] == nil, "no system file (it failed)")
+} catch {
+    check(false, "partial-failure VM: \(error)")
+}
+RecordingsDirectory.baseDirectory = nil
+
 // MARK: - Report
 print("\n\(passed) passed, \(failed) failed")
 if failed > 0 {
