@@ -98,6 +98,14 @@ struct MeetingDetailView: View {
     @ViewBuilder
     private func summaryBody(_ s: MeetingSummary) -> some View {
         SectionText("Summary")
+        if s.transcriptWasCapped {
+            Label("This meeting was long, so the summary reflects only the opening and closing of the transcript (the middle was omitted).",
+                  systemImage: "exclamationmark.triangle.fill")
+                .font(.callout)
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.bottom, 4)
+        }
         Text(s.overall.isEmpty ? "—" : s.overall)
             .font(.body)
             .fixedSize(horizontal: false, vertical: true)

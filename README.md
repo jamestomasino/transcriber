@@ -12,8 +12,8 @@ keeping only the summary.**
 > **meeting detail pane**, **completion / failure notifications**, and
 > **long-meeting hardening** (generous HTTP timeouts + retry of transient
 > failures, and a transcript cap that keeps very long recordings' LLM prompts
-> bounded) are all
-> green (259 tests, including
+> bounded, with a user-facing warning when the summary is a partial view) are all
+> green (270 tests, including
 > integration tests that drive the real pipeline → real store → the copyable
 > text the detail pane shows, across the default-retention, retry, and
 > transcript-kept paths, plus a startup orphan sweep so per-meeting recording
@@ -74,7 +74,11 @@ keeping only the summary.**
   capped: both LLM summarizers fit the transcript into a generous budget
   (`Summary.fitTranscript`, 120k chars) that keeps the opening and closing and
   marks the omission, so the prompt stays inside the model's context window and
-  cost budget instead of failing the summary.
+  cost budget instead of failing the summary. Because that cap is a *partial
+  view*, the user is told: `MeetingSummary.transcriptWasCapped` (lenient-decoded
+  so old summaries still load) is set when the transcript didn't fit and
+  surfaced in the detail pane (an orange warning banner) and in the copied text
+  (a "partial view" note).
 - A **meeting detail pane**: select any meeting to read its full structured
   summary (overall, key points, decisions, action items) and the retained
   transcript (when you opted to keep it). A failed meeting shows its error and

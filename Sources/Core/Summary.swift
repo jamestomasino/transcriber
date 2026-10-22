@@ -22,6 +22,16 @@ public enum Summary {
     /// very long recordings" half of the long-meeting risk.
     public static let defaultTranscriptBudget = 120_000
 
+    /// Whether a transcript fits within the budget (i.e. would NOT be capped).
+    /// Pure predicate so a caller can know, before/after fitting, whether the
+    /// summary reflects the whole transcript or only a partial view.
+    public static func transcriptFits(
+        _ transcript: String,
+        budget: Int = defaultTranscriptBudget
+    ) -> Bool {
+        transcript.count <= budget
+    }
+
     /// Fit a transcript into a character budget, keeping the **opening** (where
     /// the agenda and context live) and the **closing** (where decisions and
     /// action items usually land), and marking the omission in between. Short
@@ -31,7 +41,7 @@ public enum Summary {
         _ transcript: String,
         budget: Int = defaultTranscriptBudget
     ) -> String {
-        if transcript.count <= budget { return transcript }
+        if transcriptFits(transcript, budget: budget) { return transcript }
         let marker = "\n…(middle of transcript omitted)…\n"
         let available = max(budget - marker.count, 1)
         let headLen = (available * 60) / 100
@@ -64,14 +74,19 @@ public enum Summary {
 
     /// Parse a model response into a `MeetingSummary`. Lenient: finds the first
     /// balanced JSON object in the text (handles ```json fences and surrounding
-    /// prose) and tolerates missing fields.
-    public static func parse(_ raw: String) -> MeetingSummary {
+    /// prose) and tolerates missing fields. `transcriptWasCapped` records that
+    /// the summary reflects a capped (partial) transcript, so the caller can
+    /// warn the user.
+    public static func parse(_ raw: String, transcriptWasCapped: Bool = false) -> MeetingSummary {
         guard let json = extractJSONObject(in: raw),
               let data = json.data(using: .utf8)
         else {
             // Fallback: treat the whole response as the overall summary.
             let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            return MeetingSummary(overall: trimmed.isEmpty ? "(no summary produced)" : trimmed)
+            return MeetingSummary(
+                overall: trimmed.isEmpty ? "(no summary produced)" : trimmed,
+                transcriptWasCapped: transcriptWasCapped
+            )
         }
 
         let decoder = JSONDecoder()
@@ -85,14 +100,18 @@ public enum Summary {
         }
         guard let m = try? decoder.decode(M.self, from: data) else {
             let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            return MeetingSummary(overall: trimmed.isEmpty ? "(no summary produced)" : trimmed)
+            return MeetingSummary(
+                overall: trimmed.isEmpty ? "(no summary produced)" : trimmed,
+                transcriptWasCapped: transcriptWasCapped
+            )
         }
 
         return MeetingSummary(
             overall: m.overall?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "",
             keyPoints: (m.key_points ?? m.keyPoints ?? []),
             decisions: m.decisions ?? [],
-            actionItems: (m.action_items ?? m.actionItems ?? [])
+            actionItems: (m.action_items ?? m.actionItems ?? []),
+            transcriptWasCapped: transcriptWasCapped
         )
     }
 

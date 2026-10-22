@@ -799,6 +799,58 @@ do {
     check(false, "cap probe: \(error)")
 }
 
+// --- Warning: the user is told the summary is a partial view ---
+
+// transcriptFits predicate: short fits, long doesn't.
+check(Summary.transcriptFits("short"), "short transcript fits")
+check(!Summary.transcriptFits(String(repeating: "x", count: 200_000)), "very long transcript does not fit")
+
+// parse records the flag when told the transcript was capped.
+let capFlagged = Summary.parse(#"{"overall":"o"}"#, transcriptWasCapped: true)
+check(capFlagged.transcriptWasCapped, "parse records transcriptWasCapped=true")
+let capNotFlagged = Summary.parse(#"{"overall":"o"}"#)
+check(!capNotFlagged.transcriptWasCapped, "parse defaults transcriptWasCapped=false")
+
+// The summarizer sets the flag for a very long transcript and clears it for a short one.
+final class CapFlagProbe: HTTPClient {
+    func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+        return HTTPResponse(statusCode: 200, body: Data(#"{"choices":[{"message":{"content":"{\"overall\":\"ok\"}"}}]}"#.utf8))
+    }
+}
+do {
+    let capFlagLong = (0..<20_000).map { TranscriptSegment(speaker: "S\($0)", text: "a line of speech about the project") }
+    let capFlagShort = [TranscriptSegment(speaker: "S", text: "hi")]
+    let capLongOut = try await OpenAISummarizer(model: "m", apiKey: { "k" }, http: CapFlagProbe()).summarize(segments: capFlagLong, title: "T")
+    check(capLongOut.transcriptWasCapped, "summarizer flags a very long transcript as capped")
+    let capShortOut = try await OpenAISummarizer(model: "m", apiKey: { "k" }, http: CapFlagProbe()).summarize(segments: capFlagShort, title: "T")
+    check(!capShortOut.transcriptWasCapped, "summarizer leaves a short transcript uncapped")
+} catch {
+    check(false, "cap flag probe: \(error)")
+}
+
+// summaryText() carries the partial-view note when capped, and omits it otherwise.
+let capNoteMeeting = Meeting(title: "M", startedAt: .init(timeIntervalSince1970: 0), createdAt: .init(timeIntervalSince1970: 0), lastActivityAt: .init(timeIntervalSince1970: 0),
+    summary: MeetingSummary(overall: "did things", transcriptWasCapped: true))
+check(capNoteMeeting.summaryText().contains("opening and closing"), "summaryText carries the partial-view note when capped")
+check(capNoteMeeting.summaryText().contains("did things"), "summaryText still includes the overall line")
+let capNoNoteMeeting = Meeting(title: "M", startedAt: .init(timeIntervalSince1970: 0), createdAt: .init(timeIntervalSince1970: 0), lastActivityAt: .init(timeIntervalSince1970: 0),
+    summary: MeetingSummary(overall: "did things"))
+check(!capNoNoteMeeting.summaryText().contains("opening and closing"), "summaryText omits the note when not capped")
+
+// Lenient decode: a stored summary from an older build (no field) loads as uncapped.
+do {
+    let capOldJSON = #"{"overall":"o","keyPoints":[],"decisions":[],"actionItems":[],"generatedAt":0,"model":""}"#.data(using: .utf8)!
+    let capOld = try JSONDecoder().decode(MeetingSummary.self, from: capOldJSON)
+    check(!capOld.transcriptWasCapped, "old stored summary loads with transcriptWasCapped=false")
+    // Round-trip: a capped summary encodes + decodes with the flag intact.
+    let capRound = MeetingSummary(overall: "o", transcriptWasCapped: true)
+    let capRoundData = try JSONEncoder().encode(capRound)
+    let capRoundBack = try JSONDecoder().decode(MeetingSummary.self, from: capRoundData)
+    check(capRoundBack.transcriptWasCapped, "capped flag survives an encode/decode round-trip")
+} catch {
+    check(false, "cap decode: \(error)")
+}
+
 // MARK: - Phase 4: Deepgram transcriber parses diarized words
 section("cloud: deepgram transcriber parses speaker words")
 do {

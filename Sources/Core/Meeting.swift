@@ -48,6 +48,11 @@ public struct MeetingSummary: Codable, Equatable, Sendable {
     public var actionItems: [String]
     public var generatedAt: Date
     public var model: String
+    /// True when the transcript was so long it was capped before the LLM call,
+    /// so this summary reflects only the opening + closing (the middle was
+    /// omitted). Persisted with the summary because the transcript itself is
+    /// deleted by default — this is the durable record that the view is partial.
+    public var transcriptWasCapped: Bool
 
     public init(
         overall: String,
@@ -55,7 +60,8 @@ public struct MeetingSummary: Codable, Equatable, Sendable {
         decisions: [String] = [],
         actionItems: [String] = [],
         generatedAt: Date = Date(timeIntervalSince1970: 0),
-        model: String = ""
+        model: String = "",
+        transcriptWasCapped: Bool = false
     ) {
         self.overall = overall
         self.keyPoints = keyPoints
@@ -63,6 +69,25 @@ public struct MeetingSummary: Codable, Equatable, Sendable {
         self.actionItems = actionItems
         self.generatedAt = generatedAt
         self.model = model
+        self.transcriptWasCapped = transcriptWasCapped
+    }
+
+    // Lenient decoding: a file written by an older build (without
+    // transcriptWasCapped) still loads, defaulting to false.
+    private enum CodingKeys: String, CodingKey {
+        case overall, keyPoints, decisions, actionItems, generatedAt, model
+        case transcriptWasCapped
+    }
+
+    public init(from decoder: Decoder) throws {
+        let d = try decoder.container(keyedBy: CodingKeys.self)
+        overall = try d.decode(String.self, forKey: .overall)
+        keyPoints = try d.decodeIfPresent([String].self, forKey: .keyPoints) ?? []
+        decisions = try d.decodeIfPresent([String].self, forKey: .decisions) ?? []
+        actionItems = try d.decodeIfPresent([String].self, forKey: .actionItems) ?? []
+        generatedAt = try d.decodeIfPresent(Date.self, forKey: .generatedAt) ?? Date(timeIntervalSince1970: 0)
+        model = try d.decodeIfPresent(String.self, forKey: .model) ?? ""
+        transcriptWasCapped = try d.decodeIfPresent(Bool.self, forKey: .transcriptWasCapped) ?? false
     }
 }
 
@@ -124,10 +149,17 @@ public struct Meeting: Codable, Equatable, Identifiable, Sendable {
 
 public extension Meeting {
     /// A plain-text rendering of the structured summary (overall + key points +
-    /// decisions + action items). Empty string when there is no summary.
+    /// decisions + action items). Empty string when there is no summary. When
+    /// the transcript was capped (very long recording), a note is prepended so
+    /// the copied text carries the caveat that this is a partial view.
     func summaryText() -> String {
         guard let s = summary else { return "" }
-        var lines: [String] = [s.overall]
+        var lines: [String] = []
+        if s.transcriptWasCapped {
+            lines.append("Note: this meeting was long, so the summary reflects only the opening and closing of the transcript (the middle was omitted).")
+            lines.append("")
+        }
+        lines.append(s.overall)
         if !s.keyPoints.isEmpty {
             lines.append("")
             lines.append("Key points:")

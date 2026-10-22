@@ -41,9 +41,10 @@ public struct OpenAISummarizer: Summarizer {
         guard let key = apiKey(), !key.isEmpty else {
             throw LLMError("No OpenAI API key set. Add one in Settings → Summary.")
         }
+        let rawTranscript = Summary.transcriptText(segments)
         let prompt = Summary.prompt(
             title: title,
-            transcript: Summary.fitTranscript(Summary.transcriptText(segments))
+            transcript: Summary.fitTranscript(rawTranscript)
         )
         let body: [String: Any] = [
             "model": model,
@@ -65,7 +66,7 @@ public struct OpenAISummarizer: Summarizer {
         else {
             throw LLMError("Unexpected OpenAI response shape.")
         }
-        return Summary.parse(content)
+        return Summary.parse(content, transcriptWasCapped: !Summary.transcriptFits(rawTranscript))
     }
 }
 
@@ -93,9 +94,10 @@ public struct AnthropicSummarizer: Summarizer {
         guard let key = apiKey(), !key.isEmpty else {
             throw LLMError("No Anthropic API key set. Add one in Settings → Summary.")
         }
+        let rawTranscript = Summary.transcriptText(segments)
         let prompt = Summary.prompt(
             title: title,
-            transcript: Summary.fitTranscript(Summary.transcriptText(segments))
+            transcript: Summary.fitTranscript(rawTranscript)
         )
         let body: [String: Any] = [
             "model": model,
@@ -120,6 +122,6 @@ public struct AnthropicSummarizer: Summarizer {
         else {
             throw LLMError("Unexpected Anthropic response shape.")
         }
-        return Summary.parse(text)
+        return Summary.parse(text, transcriptWasCapped: !Summary.transcriptFits(rawTranscript))
     }
 }
