@@ -946,6 +946,77 @@ do {
     check(none.transcriptText() == "", "transcriptText empty when no transcript")
 }
 
+// MARK: - Integration: real pipeline → real store → copyable text
+section("integration: pipeline result renders through the real store + text helpers")
+do {
+    // A realistic pipeline result: two speakers, a full structured summary.
+    let realistic = ProcessedResult(
+        segments: [
+            TranscriptSegment(speaker: "Alice", text: "Let's lock the roadmap."),
+            TranscriptSegment(speaker: "Bob", text: "Ship settings first.")
+        ],
+        summary: MeetingSummary(
+            overall: "Aligned on the roadmap; settings is priority one.",
+            keyPoints: ["Settings first", "e2e demo deferred"],
+            decisions: ["Ship settings before beta"],
+            actionItems: ["Alice to write the spec"]
+        )
+    )
+
+    let capDir2 = FileManager.default.temporaryDirectory
+        .appendingPathComponent("transcriber-int-\(UUID().uuidString)")
+    RecordingsDirectory.baseDirectory = { capDir2 }
+
+    // Real VM, real FakeProcessor, real MeetingStore (a real file on disk).
+    let file2 = capDir2.appendingPathComponent("meetings.json")
+    let settings2 = AppSettings(keepTranscriptAfterSummary: true) // keep transcript
+    let vm2 = TranscriberViewModel(
+        capture: RecordingAudioCapture(directory: capDir2),
+        processor: FakeProcessor(result: realistic),
+        settings: settings2,
+        settingsStore: SettingsStore.inMemory(),
+        meetingStore: MeetingStore(url: file2)
+    )
+    let im = await vm2.startAsync(title: "Integration meeting")
+    await vm2.stopAsync()   // runs the real pipeline through the real engine
+
+    // 1. The pipeline succeeded and the meeting is summarized.
+    let got = vm2.meetings.first(where: { $0.id == im.id })
+    check(got?.status == .summarized, "integration: pipeline summarized the meeting")
+
+    // 2. summaryText() renders the REAL pipeline's structured summary.
+    let st2 = got?.summaryText() ?? ""
+    check(st2.hasPrefix("Aligned on the roadmap; settings is priority one."),
+          "integration: summaryText starts with the real overall")
+    check(st2.contains("Key points:") && st2.contains("• Settings first"),
+          "integration: summaryText renders the real key points")
+    check(st2.contains("Decisions:") && st2.contains("• Ship settings before beta"),
+          "integration: summaryText renders the real decisions")
+    check(st2.contains("Action items:") && st2.contains("• Alice to write the spec"),
+          "integration: summaryText renders the real action items")
+
+    // 3. Because keepTranscript is on, the transcript is retained and its
+    //    text matches exactly what the detail pane would show / copy.
+    let tt2 = got?.transcriptText() ?? ""
+    check(tt2 == "[Alice] Let's lock the roadmap.\n[Bob] Ship settings first.",
+          "integration: retained transcriptText matches the real segments")
+
+    // 4. The same meeting, re-loaded from disk by a FRESH store, renders
+    //    identically — proving the copyable text is stable across the
+    //    persistence boundary the detail pane actually reads from.
+    let reloaded = MeetingStore(url: file2).load().first(where: { $0.id == im.id })
+    check(reloaded?.summaryText() == st2, "integration: summaryText stable across store reload")
+    check(reloaded?.transcriptText() == tt2, "integration: transcriptText stable across store reload")
+
+    // 5. The delete action removes the meeting from the real store + disk.
+    vm2.delete(id: im.id)
+    check(vm2.meetings.isEmpty, "integration: delete removes the meeting from the VM")
+    check(MeetingStore(url: file2).load().isEmpty,
+          "integration: delete persists to disk (real store now empty)")
+} catch {
+    check(false, "integration: \(error)")
+}
+
 // MARK: - Report
 print("\n\(passed) passed, \(failed) failed")
 if failed > 0 {

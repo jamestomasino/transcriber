@@ -7,7 +7,7 @@ only the **summary** — deleting the audio and the transcript.
 
 > **Implementation progress (as of the meeting detail pane).** Phases 0–5
 > plus the Settings window, menu bar, and the meeting detail pane are built and
-> green (164 tests, `bash build.sh test`): the pure core model + engine, mic +
+> green (174 tests, `bash build.sh test`): the pure core model + engine, mic +
 > system audio capture, the **transcribe → diarize → summarize → retention**
 > pipeline (pluggable Apple Speech / Deepgram + OpenAI / Anthropic), **durable
 > persistence** via `MeetingStore` → `meetings.json`, and a **Settings window**
@@ -23,7 +23,11 @@ only the **summary** — deleting the audio and the transcript.
 > **copy** / **delete** actions — the copyable text comes from pure Core
 > helpers (`summaryText()` / `transcriptText()`). Remaining: the Phase 6–7
 > polish (startup orphan sweep, onboarding, notifications, long-meeting
-> hardening) and a live end-to-end run with a real key.
+> hardening) and a live end-to-end run with a real key. Note: the detail pane's
+> on-screen rendering has been verified only indirectly — the app launches with
+> seeded data and its window opens, and the copyable text it shows is covered by
+> the integration test — but the live display was asleep during the session, so
+> a visual confirmation of the rendered pane is still outstanding.
 
 This plan is written to be implemented on top of the `timetracker` repo: same
 architecture, same build system, same conventions. Where it differs, the

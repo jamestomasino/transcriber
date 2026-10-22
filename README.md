@@ -9,7 +9,9 @@ keeping only the summary.**
 > build, test harness, pure core model + engine, the mic + system-audio capture
 > path, the **transcribe → diarize → summarize → retention** pipeline,
 > **durable persistence**, a **settings window**, a **menu-bar item**, and a
-> **meeting detail pane** are in place and green (164 tests).
+> **meeting detail pane** are in place and green (174 tests, including an
+> integration test that drives the real pipeline → real store → the copyable
+> text the detail pane shows).
 > Transcription is pluggable — **local Apple Speech** (private, on-device, no
 > key) by default, or **Deepgram** for accurate speaker ID — and summarization
 > runs on **OpenAI** or **Anthropic**. A download-on-demand model store is in
