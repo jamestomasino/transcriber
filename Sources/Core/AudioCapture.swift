@@ -77,6 +77,47 @@ public enum RecordingsDirectory {
     public static func forMeeting(_ id: UUID) -> URL {
         base().appendingPathComponent(id.uuidString, isDirectory: true)
     }
+
+    /// The per-meeting directories that are safe to delete at startup.
+    ///
+    /// Pure (Foundation-only): it *decides* which directories to remove and
+    /// returns their URLs; the caller performs the `FileManager.remove` side
+    /// effect. This is the same posture as `RetentionPolicy` — the product's
+    /// "keep only the summary" promise made testable without I/O.
+    ///
+    /// A directory is an orphan when:
+    /// - its name is a UUID (so we never touch anything we didn't create), and
+    /// - it is not a *live* meeting's directory (`liveIDs`), OR it is a live
+    ///   meeting's directory but is already **empty** (a leftover from a build
+    ///   that summarized the meeting but never cleaned the dir up).
+    ///
+    /// A live, non-empty directory is always kept: it may hold audio the user
+    /// still needs to retry a failed meeting, so the sweep never deletes it.
+    public static func orphanDirectories(liveIDs: Set<UUID>, base: URL? = nil) -> [URL] {
+        let b = base ?? Self.base()
+        guard let entries = try? FileManager.default.contentsOfDirectory(
+            at: b, includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else { return [] }
+
+        var orphans: [URL] = []
+        for entry in entries {
+            guard let isDir = try? entry.resourceValues(forKeys: [.isDirectoryKey]).isDirectory,
+                  isDir,
+                  let uuid = UUID(uuidString: entry.lastPathComponent)
+            else { continue }
+
+            if !liveIDs.contains(uuid) {
+                orphans.append(entry)
+            } else if let contents = try? FileManager.default.contentsOfDirectory(
+                at: entry, includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            ), contents.isEmpty {
+                orphans.append(entry)
+            }
+        }
+        return orphans
+    }
 }
 
 /// A running capture session.

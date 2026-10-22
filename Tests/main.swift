@@ -1095,6 +1095,113 @@ do {
     check(false, "default-retention/retry: \(error)")
 }
 
+// MARK: - Orphan recording-directory sweep (Phase 7.1)
+section("orphan sweep: pure decision + VM cleanup")
+do {
+    // --- 1. Pure decision: which dirs are orphans ---
+    let base = FileManager.default.temporaryDirectory
+        .appendingPathComponent("transcriber-sweep-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+
+    // A non-UUID dir (not ours) → never touched.
+    let foreign = base.appendingPathComponent("not-a-uuid")
+    try FileManager.default.createDirectory(at: foreign, withIntermediateDirectories: true)
+
+    // A UUID dir with no live meeting → orphan.
+    let dead = UUID()
+    let deadDir = base.appendingPathComponent(dead.uuidString)
+    try FileManager.default.createDirectory(at: deadDir, withIntermediateDirectories: true)
+    try Data("stale audio".utf8).write(to: deadDir.appendingPathComponent("mic.wav"))
+
+    // A UUID dir for a *live* meeting that is non-empty → kept (retryable audio).
+    let live = UUID()
+    let liveDir = base.appendingPathComponent(live.uuidString)
+    try FileManager.default.createDirectory(at: liveDir, withIntermediateDirectories: true)
+    try Data("live audio".utf8).write(to: liveDir.appendingPathComponent("mic.wav"))
+
+    // A UUID dir for a *live* meeting that is empty → orphan (leftover).
+    let liveEmpty = UUID()
+    let liveEmptyDir = base.appendingPathComponent(liveEmpty.uuidString)
+    try FileManager.default.createDirectory(at: liveEmptyDir, withIntermediateDirectories: true)
+
+    let liveIDs: Set<UUID> = [live, liveEmpty]
+    let orphans = Set(RecordingsDirectory.orphanDirectories(liveIDs: liveIDs, base: base).map(\.lastPathComponent))
+    check(orphans.contains(deadDir.lastPathComponent), "sweep: dead UUID dir is an orphan")
+    check(orphans.contains(liveEmptyDir.lastPathComponent), "sweep: live but empty dir is an orphan")
+    check(!orphans.contains(liveDir.lastPathComponent), "sweep: live non-empty dir is KEPT (retryable)")
+    check(!orphans.contains(foreign.lastPathComponent), "sweep: non-UUID dir is never touched")
+
+    // --- 2. VM sweep actually removes the orphans and keeps the live one ---
+    RecordingsDirectory.baseDirectory = { base }
+    let liveNow = Date()
+    let liveMeeting = Meeting(id: live, title: "Live", status: .failed,
+                              startedAt: liveNow, createdAt: liveNow, lastActivityAt: liveNow,
+                              audioFileURLs: [.mic: liveDir.appendingPathComponent("mic.wav")])
+    let vm = TranscriberViewModel(
+        capture: RecordingAudioCapture(directory: base),
+        processor: NoopProcessor(),
+        settings: AppSettings(),
+        settingsStore: SettingsStore.inMemory(),
+        meetingStore: MeetingStore.inMemory(initial: [liveMeeting])
+    )
+    // The sweep runs in init; assert its effect on disk.
+    check(!FileManager.default.fileExists(atPath: deadDir.path), "sweep: dead dir removed from disk")
+    check(!FileManager.default.fileExists(atPath: liveEmptyDir.path), "sweep: live-empty dir removed from disk")
+    check(FileManager.default.fileExists(atPath: liveDir.appendingPathComponent("mic.wav").path),
+          "sweep: live non-empty dir's audio is preserved")
+    check(FileManager.default.fileExists(atPath: foreign.path), "sweep: foreign dir untouched")
+
+    // --- 3. Pipeline retention now removes the empty per-meeting dir ---
+    // Drive a real pipeline to success (default retention) and confirm the
+    // per-meeting directory is gone from disk, not just the audio files.
+    let pDir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("transcriber-pipeline-dir-\(UUID().uuidString)")
+    RecordingsDirectory.baseDirectory = { pDir }
+    let pFile = pDir.appendingPathComponent("meetings.json")
+    let pvm = TranscriberViewModel(
+        capture: RecordingAudioCapture(directory: pDir),
+        processor: FakeProcessor(result: ProcessedResult(
+            segments: [TranscriptSegment(speaker: "A", text: "hi")],
+            summary: MeetingSummary(overall: "ok", keyPoints: ["p"])
+        )),
+        settings: AppSettings(),   // default retention: delete audio + transcript
+        settingsStore: SettingsStore.inMemory(),
+        meetingStore: MeetingStore(url: pFile)
+    )
+    let pm = await pvm.startAsync(title: "Pipeline dir cleanup")
+    await pvm.stopAsync()
+    let pMeeting = pvm.meetings.first(where: { $0.id == pm.id })
+    check(pMeeting?.status == .summarized, "dir-cleanup: summarized")
+    let pdir = RecordingsDirectory.forMeeting(pm.id)
+    check(!FileManager.default.fileExists(atPath: pdir.path),
+          "dir-cleanup: empty per-meeting dir removed after retention (no leak)")
+
+    // --- 4. keepAudio=true → the dir survives (audio is retained) ---
+    let kDir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("transcriber-keep-dir-\(UUID().uuidString)")
+    RecordingsDirectory.baseDirectory = { kDir }
+    let kFile = kDir.appendingPathComponent("meetings.json")
+    var keepSettings = AppSettings()
+    keepSettings.keepAudioAfterSummary = true
+    let kvm = TranscriberViewModel(
+        capture: RecordingAudioCapture(directory: kDir),
+        processor: FakeProcessor(result: ProcessedResult(
+            segments: [TranscriptSegment(speaker: "A", text: "hi")],
+            summary: MeetingSummary(overall: "ok", keyPoints: ["p"])
+        )),
+        settings: keepSettings,
+        settingsStore: SettingsStore.inMemory(),
+        meetingStore: MeetingStore(url: kFile)
+    )
+    let km = await kvm.startAsync(title: "Keep audio dir")
+    await kvm.stopAsync()
+    let kdir = RecordingsDirectory.forMeeting(km.id)
+    check(FileManager.default.fileExists(atPath: kdir.path),
+          "keepAudio: per-meeting dir retained because audio is kept")
+} catch {
+    check(false, "orphan-sweep: \(error)")
+}
+
 // MARK: - Report
 print("\n\(passed) passed, \(failed) failed")
 if failed > 0 {

@@ -85,6 +85,24 @@ public final class TranscriberViewModel: ObservableObject {
         }
         self.meetings = engine.recent
         self.activeMeeting = engine.active
+        // Backstop for the retention promise: remove any per-meeting recording
+        // directories that outlived their meeting (a prior build that cleaned
+        // the audio files but not the dir, or a crash mid-pipeline). This is
+        // idempotent and safe — it only touches UUID-named dirs that aren't a
+        // live meeting's (or are a live meeting's but already empty).
+        self.sweepOrphanRecordings()
+    }
+
+    /// Remove per-meeting recording directories that no longer correspond to a
+    /// live meeting (or are empty leftovers). Pure decision lives in
+    /// `RecordingsDirectory.orphanDirectories`; this performs the I/O. Returns
+    /// the directories removed, so tests can assert the sweep's effect.
+    @discardableResult
+    public func sweepOrphanRecordings() -> [URL] {
+        let liveIDs = Set(engine.stored.map(\.id))
+        let orphans = RecordingsDirectory.orphanDirectories(liveIDs: liveIDs)
+        for url in orphans { try? FileManager.default.removeItem(at: url) }
+        return orphans
     }
 
     // MARK: - Persistence
@@ -247,6 +265,18 @@ public final class TranscriberViewModel: ObservableObject {
             for url in toDelete { try? FileManager.default.removeItem(at: url) }
             if !policy.keepAudio {
                 engine.clearAudioFiles(id: id)
+            }
+            // The retention promise keeps only the summary: once the raw audio
+            // and transcript file are deleted, the per-meeting directory is
+            // empty and must not leak into the user's Application Support. If
+            // the user opted to keep audio or the transcript, the directory
+            // still holds those files and is left in place.
+            let dir = RecordingsDirectory.forMeeting(id)
+            if let contents = try? FileManager.default.contentsOfDirectory(
+                at: dir, includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            ), contents.isEmpty {
+                try? FileManager.default.removeItem(at: dir)
             }
 
             processingProgress = nil

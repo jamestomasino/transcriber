@@ -9,10 +9,11 @@ keeping only the summary.**
 > build, test harness, pure core model + engine, the mic + system-audio capture
 > path, the **transcribe → diarize → summarize → retention** pipeline,
 > **durable persistence**, a **settings window**, a **menu-bar item**, and a
-> **meeting detail pane** are in place and green (186 tests, including
+> **meeting detail pane** are in place and green (197 tests, including
 > integration tests that drive the real pipeline → real store → the copyable
 > text the detail pane shows, across the default-retention, retry, and
-> transcript-kept paths).
+> transcript-kept paths, plus a startup orphan sweep so per-meeting recording
+> directories never leak into Application Support).
 > Transcription is pluggable — **local Apple Speech** (private, on-device, no
 > key) by default, or **Deepgram** for accurate speaker ID — and summarization
 > runs on **OpenAI** or **Anthropic**. A download-on-demand model store is in
@@ -36,6 +37,9 @@ keeping only the summary.**
 - Generate a structured summary: overall, key points, decisions, action items.
 - Save only the summary; delete the audio and transcript by default
   (`RetentionPolicy`; opt-in "keep transcript / keep audio" flags on `AppSettings`).
+  Once the raw audio is gone, the per-meeting recording directory is removed too,
+  and a **startup orphan sweep** clears any that outlived their meeting — so no
+  empty directories leak into `~/Library/Application Support`.
 - The summary is **durable**: meetings persist to `meetings.json` across
   relaunches (`MeetingStore`). A meeting that was mid-flight (recording or
   processing) when the app quit is reconciled to a retryable `.failed` state on

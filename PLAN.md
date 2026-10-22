@@ -5,9 +5,10 @@ captures Zoom / Slack / Teams conversations), then turns that recording into a
 **transcript with identified speakers**, writes a **meeting summary**, and keeps
 only the **summary** — deleting the audio and the transcript.
 
-> **Implementation progress (as of the meeting detail pane).** Phases 0–5
-> plus the Settings window, menu bar, and the meeting detail pane are built and
-> green (186 tests, `bash build.sh test`): the pure core model + engine, mic +
+> **Implementation progress (as of the meeting detail pane + orphan sweep).**
+> Phases 0–5 plus the Settings window, menu bar, the meeting detail pane, and
+> the startup orphan sweep are built and green (197 tests, `bash build.sh test`):
+> the pure core model + engine, mic +
 > system audio capture, the **transcribe → diarize → summarize → retention**
 > pipeline (pluggable Apple Speech / Deepgram + OpenAI / Anthropic), **durable
 > persistence** via `MeetingStore` → `meetings.json`, and a **Settings window**
@@ -21,11 +22,17 @@ only the **summary** — deleting the audio and the transcript.
 > opens a **detail pane** with the full structured summary, the retained
 > transcript (when kept), a **Retry** button for failed meetings, and
 > **copy** / **delete** actions — the copyable text comes from pure Core
-> helpers (`summaryText()` / `transcriptText()`). Remaining: the Phase 6–7
-> polish (startup orphan sweep, onboarding, notifications, long-meeting
-> hardening) and a live end-to-end run with a real key. Note: the detail pane's
-> on-screen rendering has been verified only indirectly — the app launches with
-> seeded data and its window opens, and the copyable text it shows is covered by
+> helpers (`summaryText()` / `transcriptText()`). The **startup orphan sweep**
+> is done: retention now removes the empty per-meeting recording directory after
+> a successful summary, and `TranscriberViewModel` runs a pure
+> `RecordingsDirectory.orphanDirectories(liveIDs:)` decision at launch to clear
+> any that outlived their meeting (a live, non-empty dir is always kept so a
+> failed meeting's audio stays retryable) — so no empty directories leak into
+> `~/Library/Application Support`. Remaining: the Phase 6–7 polish (onboarding,
+> notifications, long-meeting hardening) and a live end-to-end run with a real
+> key. Note: the detail pane's on-screen rendering has been verified only
+> indirectly — the app launches with seeded data and its window opens, and the
+> copyable text it shows is covered by
 > the integration test — but the live display was asleep during the session, so
 > a visual confirmation of the rendered pane is still outstanding.
 
