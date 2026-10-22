@@ -116,6 +116,44 @@ public struct Meeting: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
+// MARK: - Pure text rendering (Core)
+//
+// Plain-text renderings of a meeting's artifacts. Kept in Core (pure, no I/O)
+// so the "Copy" button and the detail view share one deterministic source, and
+// so the formatting is unit-testable without SwiftUI or AppKit.
+
+public extension Meeting {
+    /// A plain-text rendering of the structured summary (overall + key points +
+    /// decisions + action items). Empty string when there is no summary.
+    func summaryText() -> String {
+        guard let s = summary else { return "" }
+        var lines: [String] = [s.overall]
+        if !s.keyPoints.isEmpty {
+            lines.append("")
+            lines.append("Key points:")
+            lines += s.keyPoints.map { "• \($0)" }
+        }
+        if !s.decisions.isEmpty {
+            lines.append("")
+            lines.append("Decisions:")
+            lines += s.decisions.map { "• \($0)" }
+        }
+        if !s.actionItems.isEmpty {
+            lines.append("")
+            lines.append("Action items:")
+            lines += s.actionItems.map { "• \($0)" }
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    /// A plain-text rendering of the transcript ("Speaker: text" per segment).
+    /// Empty string when there is no transcript (e.g. it was deleted by
+    /// retention).
+    func transcriptText() -> String {
+        transcript.map { "[\($0.speaker)] \($0.text)" }.joined(separator: "\n")
+    }
+}
+
 // MARK: - Clock (determinism under test)
 //
 // Same shape as the base repo: a protocol the engine depends on, a

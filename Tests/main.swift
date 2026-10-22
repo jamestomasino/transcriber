@@ -893,6 +893,59 @@ do {
     check(false, "factory seam: \(error)")
 }
 
+// MARK: - Pure text rendering (summaryText / transcriptText)
+section("summaryText / transcriptText render deterministically")
+do {
+    let full = Meeting(
+        title: "T",
+        startedAt: Date(timeIntervalSince1970: 0),
+        createdAt: Date(timeIntervalSince1970: 0),
+        lastActivityAt: Date(timeIntervalSince1970: 0),
+        transcript: [
+            TranscriptSegment(speaker: "Alice", text: "Hello"),
+            TranscriptSegment(speaker: "Bob", text: "Hi Alice")
+        ],
+        summary: MeetingSummary(
+            overall: "We shipped it.",
+            keyPoints: ["Point one", "Point two"],
+            decisions: ["Ship on Friday"],
+            actionItems: ["Write docs"]
+        )
+    )
+
+    let st = full.summaryText()
+    check(st.hasPrefix("We shipped it."), "summaryText starts with overall")
+    check(st.contains("Key points:"), "summaryText has key points header")
+    check(st.contains("• Point one"), "summaryText bullets key points")
+    check(st.contains("Decisions:") && st.contains("• Ship on Friday"), "summaryText has decisions")
+    check(st.contains("Action items:") && st.contains("• Write docs"), "summaryText has action items")
+
+    // Sections that are empty must not appear.
+    let minimal = Meeting(
+        title: "M",
+        startedAt: Date(timeIntervalSince1970: 0),
+        createdAt: Date(timeIntervalSince1970: 0),
+        lastActivityAt: Date(timeIntervalSince1970: 0),
+        summary: MeetingSummary(overall: "Just a line.")
+    )
+    check(minimal.summaryText() == "Just a line.",
+          "summaryText omits empty sections")
+
+    // No summary at all → empty string.
+    let none = Meeting(
+        title: "N",
+        startedAt: Date(timeIntervalSince1970: 0),
+        createdAt: Date(timeIntervalSince1970: 0),
+        lastActivityAt: Date(timeIntervalSince1970: 0)
+    )
+    check(none.summaryText() == "", "summaryText empty when no summary")
+
+    // Transcript rendering: "Speaker: text" per line, joined by newline.
+    let tt = full.transcriptText()
+    check(tt == "[Alice] Hello\n[Bob] Hi Alice", "transcriptText renders speaker: text lines")
+    check(none.transcriptText() == "", "transcriptText empty when no transcript")
+}
+
 // MARK: - Report
 print("\n\(passed) passed, \(failed) failed")
 if failed > 0 {

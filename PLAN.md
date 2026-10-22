@@ -5,11 +5,11 @@ captures Zoom / Slack / Teams conversations), then turns that recording into a
 **transcript with identified speakers**, writes a **meeting summary**, and keeps
 only the **summary** — deleting the audio and the transcript.
 
-> **Implementation progress (as of the Settings UI).** Phases 0–5 plus the
-> Settings window and menu bar are built and green (155 tests,
-> `bash build.sh test`): the pure core model + engine, mic + system audio
-> capture, the **transcribe → diarize → summarize → retention** pipeline
-> (pluggable Apple Speech / Deepgram + OpenAI / Anthropic), **durable
+> **Implementation progress (as of the meeting detail pane).** Phases 0–5
+> plus the Settings window, menu bar, and the meeting detail pane are built and
+> green (164 tests, `bash build.sh test`): the pure core model + engine, mic +
+> system audio capture, the **transcribe → diarize → summarize → retention**
+> pipeline (pluggable Apple Speech / Deepgram + OpenAI / Anthropic), **durable
 > persistence** via `MeetingStore` → `meetings.json`, and a **Settings window**
 > (⌘,) for backends, models, retention, language, and API keys (Keychain).
 > The summary survives a relaunch (the product's core promise), and a meeting
@@ -17,9 +17,13 @@ only the **summary** — deleting the audio and the transcript.
 > state on next launch. The pipeline is now **rebuilt from the current settings
 > at run time** (a `processorFactory` seam on the view model), so switching
 > backend or model in Settings takes effect on the next meeting without a
-> relaunch. A **menu-bar item** offers a live Start / Stop. Remaining: the
-> Phase 6–7 polish (startup orphan sweep, onboarding, notifications, retry UX,
-> long-meeting hardening) and a live end-to-end run with a real key.
+> relaunch. A **menu-bar item** offers a live Start / Stop. Selecting a meeting
+> opens a **detail pane** with the full structured summary, the retained
+> transcript (when kept), a **Retry** button for failed meetings, and
+> **copy** / **delete** actions — the copyable text comes from pure Core
+> helpers (`summaryText()` / `transcriptText()`). Remaining: the Phase 6–7
+> polish (startup orphan sweep, onboarding, notifications, long-meeting
+> hardening) and a live end-to-end run with a real key.
 
 This plan is written to be implemented on top of the `timetracker` repo: same
 architecture, same build system, same conventions. Where it differs, the

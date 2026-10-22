@@ -35,6 +35,7 @@ CORE_SRC=(
 APP_SRC=(
   Sources/App/TranscriberApp.swift
   Sources/App/ContentView.swift
+  Sources/App/MeetingDetailView.swift
   Sources/App/SettingsView.swift
   Sources/App/RealAudioCapture.swift
   Sources/App/HTTPClient.swift

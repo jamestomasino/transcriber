@@ -5,10 +5,11 @@ from Zoom / Slack / Teams), transcribes it with speaker identification, generate
 a structured summary, and then **deletes the audio and the raw transcript,
 keeping only the summary.**
 
-> **Status:** Phase 6 (Settings UI + menu bar) in progress. The build, test
-> harness, pure core model + engine, the mic + system-audio capture path, the
-> **transcribe → diarize → summarize → retention** pipeline, **durable
-> persistence**, and a **settings window** are in place and green (155 tests).
+> **Status:** Phase 6 (Settings UI + menu bar + detail view) in progress. The
+> build, test harness, pure core model + engine, the mic + system-audio capture
+> path, the **transcribe → diarize → summarize → retention** pipeline,
+> **durable persistence**, a **settings window**, a **menu-bar item**, and a
+> **meeting detail pane** are in place and green (164 tests).
 > Transcription is pluggable — **local Apple Speech** (private, on-device, no
 > key) by default, or **Deepgram** for accurate speaker ID — and summarization
 > runs on **OpenAI** or **Anthropic**. A download-on-demand model store is in
@@ -18,8 +19,11 @@ keeping only the summary.**
 > summary is the only durable artifact. Backends, models, retention, and API
 > keys are now **user-configurable in the Settings window** (⌘,) — and because
 > the pipeline is rebuilt from the *current* settings at run time, switching
-> backend or model takes effect on the next meeting without a relaunch. A
-> **menu-bar item** offers a live Start / Stop. See [PLAN.md](PLAN.md).
+> backend or model takes effect on the next meeting without a relaunch. Select
+> a meeting to read its **full structured summary** (overall, key points,
+> decisions, action items), the **retained transcript** (when you opted to
+> keep it), and to **retry** a failed meeting, **copy** the summary/transcript,
+> or **delete** it. See [PLAN.md](PLAN.md).
 
 ## Features
 
@@ -43,6 +47,14 @@ keeping only the summary.**
   on the next meeting without a relaunch.
 - A **menu-bar item** with a live Start / Stop, so a meeting can be started or
   stopped without the main window focused.
+- A **meeting detail pane**: select any meeting to read its full structured
+  summary (overall, key points, decisions, action items) and the retained
+  transcript (when you opted to keep it). A failed meeting shows its error and
+  a **Retry** button (it re-runs with the current backend + key); you can also
+  **copy** the summary or transcript to the clipboard, or **delete** the
+  meeting. The copyable text is produced by pure Core helpers
+  (`summaryText()` / `transcriptText()`), so the on-screen view and the
+  clipboard share one deterministic source.
 
 ## Backends
 
@@ -96,10 +108,11 @@ Sources/Core/   Pure, AppKit-free core (Foundation only): model, engine, view
                 retention, persistence (MeetingStore → meetings.json), model
                 store, summary parser, and the pluggable LLM / Deepgram
                 backends. Fully unit-testable.
-Sources/App/    SwiftUI/AppKit shell (window + menu bar), plus the platform
-                pieces that Core stays pure of: real audio capture (AVFoundation),
-                local Speech transcription, the URLSession HTTP + model
-                downloaders, Keychain-backed API keys, and the processor factory.
+Sources/App/    SwiftUI/AppKit shell (window + menu bar + meeting detail pane),
+                plus the platform pieces that Core stays pure of: real audio
+                capture (AVFoundation), local Speech transcription, the
+                URLSession HTTP + model downloaders, Keychain-backed API keys,
+                and the processor factory.
 Tests/          Custom assertion-based test harness (no XCTest)
 build.sh        swiftc-only build (app + tests), with SDK fallback
 PLAN.md         Full design, architecture, roadmap, and open decisions

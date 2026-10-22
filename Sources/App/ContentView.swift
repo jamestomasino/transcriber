@@ -6,8 +6,9 @@ import TranscriberCore
 
 /// The main window. Phase 3 adds the live audio meter and the permission /
 /// capture-status card so the user can see input while recording and is told
-/// exactly what to fix when a source fails. The full UI (detail view, menu bar,
-/// onboarding, settings) lands in Phase 4.
+/// exactly what to fix when a source fails. Phase 6 adds a detail pane (full
+/// structured summary + retained transcript + retry / copy / delete) so the
+/// user can actually read the artifact the app produces.
 struct ContentView: View {
     @ObservedObject var vm: TranscriberViewModel
 
@@ -15,6 +16,8 @@ struct ContentView: View {
     /// exactly the macro that the build's SDK-fallback exists for, so it is
     /// deliberately present to keep that path exercised.
     @State private var newTitle: String = ""
+    /// The meeting currently selected in the list, shown in the detail pane.
+    @State private var selection: Meeting.ID?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -28,11 +31,31 @@ struct ContentView: View {
                 statusCard
                 Divider()
             }
-            list
+            NavigationSplitView {
+                list
+            } detail: {
+                if let id = selection, let m = vm.meetings.first(where: { $0.id == id }) {
+                    MeetingDetailView(vm: vm, meeting: m)
+                } else {
+                    detailPlaceholder
+                }
+            }
+            .navigationSplitViewStyle(.balanced)
         }
-        .frame(minWidth: 460, minHeight: 320)
+        .frame(minWidth: 560, minHeight: 360)
         .onAppear { vm.startLevelMeter() }
         .onDisappear { vm.stopLevelMeter() }
+    }
+
+    private var detailPlaceholder: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "doc.text.magnifyingglass")
+                .font(.largeTitle)
+                .foregroundStyle(.secondary)
+            Text("Select a meeting to read its summary")
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var header: some View {
@@ -126,22 +149,57 @@ struct ContentView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                List(vm.meetings) { m in
-                    HStack {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(m.title).font(.headline)
-                            Text(m.status.rawValue).font(.caption).foregroundStyle(.secondary)
+                List(selection: $selection) {
+                    ForEach(vm.meetings) { m in
+                        HStack {
+                            Image(systemName: statusIcon(m.status))
+                                .foregroundStyle(statusColor(m.status))
+                                .frame(width: 18)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(m.title).font(.headline)
+                                Text(statusLabel(m.status))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            if let s = m.summary, !s.overall.isEmpty {
+                                Text(s.overall)
+                                    .lineLimit(1)
+                                    .foregroundStyle(.secondary)
+                            }
                         }
-                        Spacer()
-                        if let s = m.summary {
-                            Text(s.overall)
-                                .lineLimit(1)
-                                .foregroundStyle(.secondary)
-                        }
+                        .tag(m.id)
                     }
                 }
                 .listStyle(.inset)
             }
+        }
+    }
+
+    private func statusIcon(_ s: MeetingStatus) -> String {
+        switch s {
+        case .recording:  return "record.circle.fill"
+        case .processing: return "hourglass"
+        case .summarized: return "checkmark.circle.fill"
+        case .failed:     return "xmark.circle.fill"
+        }
+    }
+
+    private func statusColor(_ s: MeetingStatus) -> Color {
+        switch s {
+        case .recording:  return .orange
+        case .processing: return .blue
+        case .summarized: return .green
+        case .failed:     return .red
+        }
+    }
+
+    private func statusLabel(_ s: MeetingStatus) -> String {
+        switch s {
+        case .recording:  return "Recording"
+        case .processing: return "Processing…"
+        case .summarized: return "Summarized"
+        case .failed:     return "Failed — select to retry"
         }
     }
 }
