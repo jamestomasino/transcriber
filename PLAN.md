@@ -9,6 +9,45 @@ This plan is written to be implemented on top of the `timetracker` repo: same
 architecture, same build system, same conventions. Where it differs, the
 difference is called out.
 
+> **Read this first — where I had to guess.** You asked for a plan, not a
+> spec, so I filled the gaps with sensible defaults and flagged them. The
+> items marked **ASSUMPTION** are things I decided on your behalf that you
+> should confirm or override before I start coding. Everything else is either
+> directly stated in your request or a safe engineering default.
+
+- **ASSUMPTION — "identify different speakers" = speaker diarization.**
+  I interpreted "identify different speakers" as *automatic* speaker
+  separation (labeling utterances Speaker 1 / Speaker 2 / …), not as the user
+  manually tagging who said what. If you meant manual labeling, the pipeline
+  changes a lot (no diarization engine needed).
+- **ASSUMPTION — the summary is the only durable artifact.** You said "save
+  only the meeting summary." I read that as: the **summary text is the only
+  thing persisted**; the audio and the full transcript are deleted after the
+  summary is generated. I've made this the *default* but left a toggle to keep
+  the transcript (in case you want it). If you want the transcript gone
+  *always* with no option, say so and I'll hard-code it.
+- **ASSUMPTION — "meeting" is a single continuous recording.** I assumed one
+  Start → one Stop = one meeting, transcribed after Stop. I did **not** assume
+  live/real-time transcription (you didn't ask for it), and I did **not**
+  assume multiple simultaneous meetings.
+- **ASSUMPTION — local-first is *not* required.** You didn't say "offline" or
+  "no API." So I've planned for a **cloud transcription + LLM summary** as the
+  primary path (most reliable speaker ID + best summaries), with a **local
+  (on-device)** fallback as a secondary. If privacy/offline is a hard
+  requirement, that flips the priority — tell me.
+- **ASSUMPTION — macOS-only, Apple Silicon, no Xcode.** I'm mirroring
+  `timetracker`: `swiftc`-only build, macOS 14+ target, arm64. Confirm this
+  matches your environment (I'll verify the actual machine before Phase 0).
+- **ASSUMPTION — "start/stop audio recording" = record to disk, then process.**
+  I'm capturing to a file and transcribing on Stop, not streaming. This is the
+  simpler, more robust choice and matches "transcribe the conversation" (not
+  "transcribe as it happens").
+- **ASSUMPTION — one app, one window + menu bar.** I'm assuming a normal macOS
+  app (window + optional menu-bar extra), not a menu-bar-only utility.
+
+If any of these are wrong, the cheapest fixes are the first two (diarization
+and retention), because they change the pipeline and the data model.
+
 ---
 
 ## 1. Goals & non-goals
@@ -270,11 +309,12 @@ Two sources, recorded, then mixed into one stream for ASR.
 ### Sources
 - **Mic**: `AVAudioEngine` input node → `AVAudioFile` (CAF). Standard.
 - **System audio** (Zoom/Slack/Teams output): the tricky one. macOS options:
-  1. **Screen Recording (recommended, no third-party)**: `AVCaptureScreenInput`
-     + `AVCaptureAudioFileOutput` with `audioSource = .system`, or
-     `CGDisplayStream` with an `audioOutputURL`. Both require the app to be in
-     the **Screen Recording** list (TCC). This captures *all* system output
-     audio — exactly what we want for a meeting.
+  1. **Screen Recording (recommended, no third-party)**: `CGDisplayStream`
+     with an `audioOutputURL` captures the display **and** the system audio
+     mix; it requires the app to be in the **Screen Recording** list (TCC).
+     This grabs *all* system output audio — exactly what we want for a meeting.
+     (Exact API shape and the precise Info.plist usage key to be verified
+     against the installed SDK in Phase 3; I will not ship a guessed API.)
   2. **Virtual audio device (alternative)**: BlackHole / Loopback. User routes
      system output through the virtual device and we record it as a normal
      input. No Screen Recording permission, but requires installing a driver.
@@ -471,9 +511,10 @@ artifacts to remove:
 - **Keep the SDK-fallback logic verbatim** (the `SwiftUIMacros` gotcha).
 - Info.plist additions:
   - `NSMicrophoneUsageDescription` (required for mic capture).
-  - The **Screen Recording** usage key (e.g. `NSScreenCaptureUsageDescription`)
-    — exact key name to be verified during implementation.
-  - `LSApplicationCategoryType` = productivity.
+  - The **Screen Recording** usage key — the exact key name is not settled in
+    the docs; I will verify it against the installed SDK and the TCC prompt
+    behavior in Phase 3 rather than ship a guess.
+  - `LSApplicationCategoryType` = productivity (same as the base).
 - `codesign` stays ad-hoc (required for a GUI app; also helps TCC prompts).
 
 ### `Package.swift`
@@ -520,7 +561,7 @@ each; tell me where you'd differ.
    - This drives privacy (local = audio never leaves the Mac), cost, and setup
      (cloud needs an API key).
 2. **System-audio capture method.**
-   - Recommended: **Screen Recording** (`AVCaptureScreenInput`/`CGDisplayStream`)
+   - Recommended: **Screen Recording** (`CGDisplayStream` with audio output)
      — no third-party, captures all app output.
    - Alternative: **virtual audio device** (BlackHole/Loopback).
 3. **Summary LLM.** Recommended: **OpenAI** (default) with Anthropic as an
