@@ -309,17 +309,36 @@ Two sources, recorded, then mixed into one stream for ASR.
 ### Sources
 - **Mic**: `AVAudioEngine` input node → `AVAudioFile` (CAF). Standard.
 - **System audio** (Zoom/Slack/Teams output): the tricky one. macOS options:
-  1. **Screen Recording (recommended, no third-party)**: `CGDisplayStream`
-     with an `audioOutputURL` captures the display **and** the system audio
-     mix; it requires the app to be in the **Screen Recording** list (TCC).
-     This grabs *all* system output audio — exactly what we want for a meeting.
-     (Exact API shape and the precise Info.plist usage key to be verified
-     against the installed SDK in Phase 3; I will not ship a guessed API.)
+  1. **ScreenCaptureKit (recommended, no third-party)**: `SCStream` +
+     `SCStreamConfiguration` with `capturesAudio = true` captures the display's
+     system audio mix. Requires the app to be in the **Screen Recording** list
+     (TCC service `kTCCServiceScreenCapture`). **No Info.plist usage string is
+     required** — verified: the ScreenCaptureKit framework references no
+     `*UsageDescription` key; the prompt is TCC-only (unlike the mic, which
+     needs `NSMicrophoneUsageDescription`). This grabs *all* system output
+     audio — exactly what we want for a meeting.
+     **Verified against the installed macOS 27 SDK** (compiles clean):
+     - Entry: `SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)`
+       → first `display`.
+     - Filter: `SCContentFilter(display:excludingWindows:[])`.
+     - Config: `capturesAudio = true` (macOS 13+); `captureMicrophone` is
+       `macOS 15+` (guard with `if #available`); set `sampleRate`/`channelCount`,
+       `showsCursor = false`, minimal `width`/`height` (we only want audio).
+     - Delegate: `stream(_:didOutputSampleBuffer:ofType:)`, handle
+       `SCStreamOutputType.audio`.
+     - Buffer → PCM: `CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer`
+       (two-call pattern: size, then fill a raw-allocated `AudioBufferList`),
+       format via `CMSampleBufferGetFormatDescription` +
+       `CMAudioFormatDescriptionGetStreamBasicDescription`, then
+       `AVAudioFormat(commonFormat:sampleRate:channels:interleaved:)` and
+       `AVAudioPCMBuffer`.
+     - `startCapture` is a callback; bridge it to async with
+       `withCheckedThrowingContinuation`.
   2. **Virtual audio device (alternative)**: BlackHole / Loopback. User routes
      system output through the virtual device and we record it as a normal
      input. No Screen Recording permission, but requires installing a driver.
 
-  **Decision needed (§15).** Default plan: **Screen Recording** (option 1).
+  **Decision needed (§15).** Default plan: **ScreenCaptureKit** (option 1).
 
 ### Mixing strategy (MVP)
 - Record **mic** and **system** as **two separate files** during capture
@@ -511,9 +530,10 @@ artifacts to remove:
 - **Keep the SDK-fallback logic verbatim** (the `SwiftUIMacros` gotcha).
 - Info.plist additions:
   - `NSMicrophoneUsageDescription` (required for mic capture).
-  - The **Screen Recording** usage key — the exact key name is not settled in
-    the docs; I will verify it against the installed SDK and the TCC prompt
-    behavior in Phase 3 rather than ship a guess.
+  - **No usage string for system audio.** Verified: ScreenCaptureKit's
+    Screen-Recording permission is TCC-only (`kTCCServiceScreenCapture`); the
+    framework references no `*UsageDescription` key. Do **not** add a guessed
+    `NSScreenCaptureUsageDescription`.
   - `LSApplicationCategoryType` = productivity (same as the base).
 - `codesign` stays ad-hoc (required for a GUI app; also helps TCC prompts).
 
@@ -561,7 +581,7 @@ each; tell me where you'd differ.
    - This drives privacy (local = audio never leaves the Mac), cost, and setup
      (cloud needs an API key).
 2. **System-audio capture method.**
-   - Recommended: **Screen Recording** (`CGDisplayStream` with audio output)
+   - Recommended: **ScreenCaptureKit** (`SCStream` + `capturesAudio`)
      — no third-party, captures all app output.
    - Alternative: **virtual audio device** (BlackHole/Loopback).
 3. **Summary LLM.** Recommended: **OpenAI** (default) with Anthropic as an

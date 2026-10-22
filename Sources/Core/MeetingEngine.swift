@@ -92,6 +92,15 @@ public final class MeetingEngine {
         if let a = active { stop(id: a.id, now: now) }
     }
 
+    /// Record the captured audio file URLs for a meeting (a side effect the
+    /// view model performs after capture finishes, then hands back here).
+    public func setAudioFiles(id: UUID, files: [AudioSource: URL], now: Date? = nil) {
+        let t = now ?? clock.now()
+        guard let idx = index(of: id) else { return }
+        meetings[idx].audioFileURLs = files
+        meetings[idx].lastActivityAt = t
+    }
+
     /// Record a successful summary. Clears the transient transcript (the
     /// on-disk audio deletion is a *side effect* handled by the view model +
     /// `RetentionPolicy`, not the engine).

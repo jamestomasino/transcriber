@@ -4,8 +4,9 @@ import AppKit
 @main
 struct TranscriberApp: App {
     /// Single shared view model so the main window and the (future) menu-bar
-    /// item always agree on state.
-    @StateObject private var vm = TranscriberViewModel()
+    /// item always agree on state. Wired to the real AVFoundation +
+    /// ScreenCaptureKit capture.
+    @StateObject private var vm = TranscriberViewModel(capture: AVAudioCapture())
 
     var body: some Scene {
         WindowGroup(id: "main") {

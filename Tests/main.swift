@@ -153,6 +153,68 @@ let codeData = try! JSONEncoder().encode(engine.meeting(id: codeMeet.id)!)
 let codeBack = try! JSONDecoder().decode(Meeting.self, from: codeData)
 check(codeBack == engine.meeting(id: codeMeet.id), "meeting round-trips through Codable")
 
+// MARK: - Phase 1: fake capture writes valid audio
+section("capture: fake writes readable audio")
+import AVFoundation
+let capDir = FileManager.default.temporaryDirectory
+    .appendingPathComponent("transcriber-test-\(UUID().uuidString)", isDirectory: true)
+do {
+    try FileManager.default.createDirectory(at: capDir, withIntermediateDirectories: true)
+    let cap = RecordingAudioCapture(directory: capDir)
+    let session = try await cap.start(sources: [.mic, .system], directory: capDir)
+    let captured = try await session.stop()
+    check(captured.fileURLs.count == 2, "fake produced two files (mic + system)")
+    for source in [AudioSource.mic, AudioSource.system] {
+        guard let url = captured.fileURLs[source] else {
+            check(false, "file exists for \(source)")
+            continue
+        }
+        check(FileManager.default.fileExists(atPath: url.path), "file on disk: \(url.lastPathComponent)")
+        do {
+            let af = try AVAudioFile(forReading: url)
+            check(af.length > 0, "\(url.lastPathComponent) is readable (\(af.length) frames)")
+            check(af.processingFormat.channelCount >= 1, "\(url.lastPathComponent) has channels")
+        } catch {
+            check(false, "\(url.lastPathComponent) readable: \(error)")
+        }
+    }
+} catch {
+    check(false, "fake capture start/stop: \(error)")
+}
+try? FileManager.default.removeItem(at: capDir)
+
+// MARK: - Phase 1: view model drives capture
+section("view model: start/stop drives capture")
+RecordingsDirectory.baseDirectory = {
+    FileManager.default.temporaryDirectory
+        .appendingPathComponent("transcriber-vm-\(UUID().uuidString)", isDirectory: true)
+}
+do {
+    let vmCapDir = RecordingsDirectory.base()
+    let vmEngine = MeetingEngine(clock: clock)
+    let vmCap = RecordingAudioCapture(directory: vmCapDir)
+    var processRan = false
+    let vm = TranscriberViewModel(engine: vmEngine, capture: vmCap) { _ in processRan = true }
+
+    let m = await vm.startAsync(title: "VM Meeting")
+    check(vm.isRecording, "VM reports recording after start")
+    check(vmEngine.active?.id == m.id, "engine has the active meeting")
+
+    await vm.stopAsync()
+    check(vmEngine.meeting(id: m.id)!.status == .processing, "meeting is processing after stop")
+    let files = vmEngine.meeting(id: m.id)!.audioFileURLs
+    check(files.count == 2, "audioFileURLs recorded (mic + system)")
+    check(files[.mic] != nil, "mic file URL recorded")
+    check(files[.system] != nil, "system file URL recorded")
+    check(files[.mic]!.lastPathComponent == "mic.wav", "mic file named correctly")
+    check(processRan, "process pipeline was invoked")
+} catch {
+    check(false, "VM start/stop: \(error)")
+}
+RecordingsDirectory.baseDirectory = nil
+try? FileManager.default.removeItem(at: FileManager.default.temporaryDirectory
+    .appendingPathComponent("transcriber-vm-\(UUID().uuidString)", isDirectory: true))
+
 // MARK: - Report
 print("\n\(passed) passed, \(failed) failed")
 if failed > 0 {

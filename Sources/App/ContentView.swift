@@ -32,7 +32,7 @@ struct ContentView: View {
             Text("Transcriber")
                 .font(.title2.bold())
             Spacer()
-            if vm.activeTitle != nil {
+            if vm.isRecording {
                 Button {
                     vm.stop()
                 } label: {
