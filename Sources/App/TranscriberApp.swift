@@ -12,11 +12,13 @@ struct TranscriberApp: App {
     init() {
         let settingsStore = SettingsStore(url: Self.settingsURL)
         let settings = settingsStore.load()
+        let meetingStore = MeetingStore(url: Self.meetingsURL)
         _vm = StateObject(wrappedValue: TranscriberViewModel(
             capture: AVAudioCapture(),
             processor: ProcessorFactory.make(settings: settings),
             settings: settings,
-            settingsStore: settingsStore
+            settingsStore: settingsStore,
+            meetingStore: meetingStore
         ))
     }
 
@@ -39,5 +41,14 @@ struct TranscriberApp: App {
             ?? FileManager.default.temporaryDirectory
         return appSupport.appendingPathComponent("Transcriber", isDirectory: true)
             .appendingPathComponent("settings.json")
+    }
+
+    /// Where meeting summaries (the only durable artifact) are persisted,
+    /// alongside settings.json.
+    static var meetingsURL: URL {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        return appSupport.appendingPathComponent("Transcriber", isDirectory: true)
+            .appendingPathComponent("meetings.json")
     }
 }

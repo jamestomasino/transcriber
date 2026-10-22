@@ -5,6 +5,18 @@ captures Zoom / Slack / Teams conversations), then turns that recording into a
 **transcript with identified speakers**, writes a **meeting summary**, and keeps
 only the **summary** — deleting the audio and the transcript.
 
+> **Implementation progress (as of Phase 5).** Phases 0–5 are built and green
+> (142 tests, `bash build.sh test`): the pure core model + engine, mic + system
+> audio capture, the **transcribe → diarize → summarize → retention** pipeline
+> (pluggable Apple Speech / Deepgram + OpenAI / Anthropic), and **durable
+> persistence** via `MeetingStore` → `meetings.json`. The summary now survives a
+> relaunch (the product's core promise), and a meeting that was mid-flight when
+> the app quit is reconciled to a retryable `.failed` state on next launch.
+> Remaining: the Settings UI panel (backends/keys/retention are wired in code
+> and tested via fakes, but not yet exposed), and the Phase 6–7 polish
+> (startup orphan sweep, onboarding, notifications, retry UX, long-meeting
+> hardening).
+
 This plan is written to be implemented on top of the `timetracker` repo: same
 architecture, same build system, same conventions. Where it differs, the
 difference is called out.

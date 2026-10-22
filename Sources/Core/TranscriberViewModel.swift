@@ -42,6 +42,11 @@ public final class TranscriberViewModel: ObservableObject {
     /// User preferences (retention, backend, model, …).
     public var settings: AppSettings
     private let settingsStore: SettingsStore?
+    /// Durable store for the meetings themselves (summaries + retained
+    /// transcripts). Optional so the test fakes and the legacy no-store path
+    /// keep working; the app always supplies one. When present, every engine
+    /// mutation is persisted so the summary survives a relaunch.
+    private let meetingStore: MeetingStore?
     private var session: AudioCaptureSession?
     /// The meeting id whose capture session is in flight (so a stray stop
     /// can't be misrouted to the wrong meeting).
@@ -54,15 +59,30 @@ public final class TranscriberViewModel: ObservableObject {
         capture: AudioCapture,
         processor: any MeetingProcessor = NoopProcessor(),
         settings: AppSettings = AppSettings(),
-        settingsStore: SettingsStore? = nil
+        settingsStore: SettingsStore? = nil,
+        meetingStore: MeetingStore? = nil
     ) {
         self.engine = engine
         self.capture = capture
         self.processor = processor
         self.settings = settings
         self.settingsStore = settingsStore
+        self.meetingStore = meetingStore
+        // Hydrate from disk if a store was supplied (reconciling mid-flight
+        // meetings to .failed), then reflect the loaded state in the UI.
+        if let store = meetingStore {
+            engine.load(store.load())
+        }
         self.meetings = engine.recent
         self.activeMeeting = engine.active
+    }
+
+    // MARK: - Persistence
+
+    /// Persist the engine's current collection to disk (a no-op when no store
+    /// is wired). Called after every mutation that should survive a relaunch.
+    private func persist() {
+        meetingStore?.save(engine.stored)
     }
 
     // MARK: - Derived
@@ -118,6 +138,9 @@ public final class TranscriberViewModel: ObservableObject {
         // error must still reach the UI. `capture.status` is empty when every
         // requested source started cleanly.
         self.captureStatus = self.capture.status
+        // Persist the new meeting (recording, or failed if capture failed)
+        // so it survives a relaunch.
+        self.persist()
         return meeting
     }
 
@@ -148,6 +171,9 @@ public final class TranscriberViewModel: ObservableObject {
                 // the pipeline decide (it will fail and the user can retry).
             }
         }
+        // Persist the stopped state + recorded audio file URLs before the
+        // pipeline runs (which persists again on its success/failure).
+        self.persist()
         self.session = nil
         self.sessionMeetingID = nil
         self.captureStatus = self.capture.status
@@ -212,6 +238,7 @@ public final class TranscriberViewModel: ObservableObject {
             self.meetings = engine.recent
             self.activeMeeting = engine.active
             self.settingsStore?.save(settings)
+            self.persist()
             return true
         } catch {
             engine.fail(id: id)
@@ -220,6 +247,7 @@ public final class TranscriberViewModel: ObservableObject {
                 ?? error.localizedDescription
             self.meetings = engine.recent
             self.activeMeeting = engine.active
+            self.persist()
             return false
         }
     }
@@ -231,6 +259,7 @@ public final class TranscriberViewModel: ObservableObject {
         engine.retry(id: id)
         self.meetings = engine.recent
         self.activeMeeting = engine.active
+        self.persist()
         return await runPipeline(for: id)
     }
 
@@ -256,6 +285,7 @@ public final class TranscriberViewModel: ObservableObject {
         if engine.delete(id: id) {
             meetings = engine.recent
             activeMeeting = engine.active
+            persist()
         }
     }
 

@@ -251,6 +251,174 @@ RecordingsDirectory.baseDirectory = nil
 try? FileManager.default.removeItem(at: FileManager.default.temporaryDirectory
     .appendingPathComponent("transcriber-vm-\(UUID().uuidString)", isDirectory: true))
 
+// MARK: - Phase 5: persistence (the summary is the durable artifact)
+section("persistence: engine.load hydrates + reconciles mid-flight")
+do {
+    let rec = Meeting(title: "Was recording", status: .recording,
+        startedAt: t0, createdAt: t0, lastActivityAt: t0)
+    let proc = Meeting(title: "Was processing", status: .processing,
+        startedAt: t0, createdAt: t0, lastActivityAt: t0)
+    let summ = Meeting(title: "Done", status: .summarized,
+        startedAt: t0, createdAt: t0, lastActivityAt: t0,
+        summary: MeetingSummary(overall: "Kept."))
+    let faild = Meeting(title: "Broke", status: .failed,
+        startedAt: t0, createdAt: t0, lastActivityAt: t0)
+
+    let e = MeetingEngine(clock: clock)
+    e.load([rec, proc, summ, faild])
+    check(e.meeting(id: rec.id)!.status == .failed, "recording reconciled to failed (retryable)")
+    check(e.meeting(id: proc.id)!.status == .failed, "processing reconciled to failed (retryable)")
+    check(e.meeting(id: summ.id)!.status == .summarized, "summarized loads untouched")
+    check(e.meeting(id: summ.id)!.summary?.overall == "Kept.", "summary survives hydration")
+    check(e.meeting(id: faild.id)!.status == .failed, "failed loads untouched")
+    check(e.stored.count == 4, "all four hydrated")
+}
+
+section("persistence: MeetingStore round-trips to a real file")
+do {
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("transcriber-store-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let file = dir.appendingPathComponent("meetings.json")
+    defer { try? FileManager.default.removeItem(at: dir) }
+
+    let m1 = Meeting(title: "Alpha", status: .summarized,
+        startedAt: t0, createdAt: t0, lastActivityAt: t0,
+        summary: MeetingSummary(overall: "One", keyPoints: ["a"]))
+    let m2 = Meeting(title: "Beta", status: .summarized,
+        startedAt: t0, createdAt: t0, lastActivityAt: t0,
+        summary: MeetingSummary(overall: "Two"))
+
+    let store = MeetingStore(url: file)
+    store.save([m1, m2])
+    check(FileManager.default.fileExists(atPath: file.path), "save wrote meetings.json")
+
+    let fresh = MeetingStore(url: file)
+    let loaded = fresh.load()
+    check(loaded.count == 2, "load returns two meetings")
+    check(loaded[0].id == m1.id && loaded[1].id == m2.id, "order preserved")
+    check(loaded[0].summary?.overall == "One", "summary content survives")
+    check(loaded[1].summary?.keyPoints.isEmpty == true, "empty keyPoints survive (not dropped)")
+
+    // Backup rotation: saving a second version keeps the first in .bak, so an
+    // irreplaceable summary is recoverable even if the live file is lost.
+    let m1v2 = Meeting(title: "Alpha v2", status: .summarized,
+        startedAt: t0, createdAt: t0, lastActivityAt: t0,
+        summary: MeetingSummary(overall: "One, revised."))
+    store.save([m1v2])
+    let bak = file.appendingPathExtension("bak")
+    check(FileManager.default.fileExists(atPath: bak.path), "save rotated the previous file to .bak")
+    let bakData = try? Data(contentsOf: bak)
+    let bakMeetings = (try? JSONDecoder().decode([Meeting].self, from: bakData ?? Data())) ?? []
+    check(bakMeetings.count == 2 && bakMeetings[0].summary?.overall == "One",
+        ".bak holds the prior generation (recoverable)")
+    check(MeetingStore(url: file).load()[0].summary?.overall == "One, revised.",
+        "live file has the newest generation")
+}
+
+section("persistence: MeetingStore is lenient on missing/corrupt files")
+do {
+    let missing = FileManager.default.temporaryDirectory
+        .appendingPathComponent("transcriber-missing-\(UUID().uuidString).json")
+    check(!FileManager.default.fileExists(atPath: missing.path), "precondition: file absent")
+    check(MeetingStore(url: missing).load().isEmpty, "missing file loads as empty (fresh app)")
+
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("transcriber-corrupt-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let file = dir.appendingPathComponent("meetings.json")
+    defer { try? FileManager.default.removeItem(at: dir) }
+    try Data("this is not valid json {".utf8).write(to: file)
+    check(MeetingStore(url: file).load().isEmpty, "corrupt file loads as empty (no crash)")
+}
+
+section("persistence: a summarized meeting survives a relaunch (end-to-end)")
+do {
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("transcriber-e2e-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let file = dir.appendingPathComponent("meetings.json")
+    defer { try? FileManager.default.removeItem(at: dir) }
+
+    // Session 1: run a meeting through the pipeline and persist it.
+    let e1 = MeetingEngine(clock: clock)
+    let store1 = MeetingStore(url: file)
+    let vm1 = TranscriberViewModel(
+        engine: e1,
+        capture: RecordingAudioCapture(directory: dir),
+        processor: FakeProcessor(),
+        meetingStore: store1
+    )
+    let m = await vm1.startAsync(title: "Durable")
+    await vm1.stopAsync()
+    check(e1.meeting(id: m.id)!.status == .summarized, "session 1: meeting summarized")
+    check(FileManager.default.fileExists(atPath: file.path), "session 1: meetings.json written")
+
+    // Session 2: a brand-new engine + VM hydrates from the same file.
+    let e2 = MeetingEngine(clock: clock)
+    let vm2 = TranscriberViewModel(
+        engine: e2,
+        capture: RecordingAudioCapture(directory: dir),
+        processor: FakeProcessor(),
+        meetingStore: MeetingStore(url: file)
+    )
+    check(vm2.meetings.count == 1, "session 2: one meeting loaded")
+    check(vm2.meeting(id: m.id)!.status == .summarized, "session 2: still summarized")
+    check(vm2.meeting(id: m.id)!.summary?.overall == "A test summary.",
+        "session 2: the summary text survived the relaunch")
+}
+
+section("persistence: a failed meeting persists and is retryable after relaunch")
+do {
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("transcriber-retry-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let file = dir.appendingPathComponent("meetings.json")
+    defer { try? FileManager.default.removeItem(at: dir) }
+
+    // Session 1: the pipeline throws → the meeting is failed and persisted.
+    let throwing = FakeProcessor(shouldThrow: ModelError.notFound("whisper-base"))
+    let e1 = MeetingEngine(clock: clock)
+    let vm1 = TranscriberViewModel(
+        engine: e1,
+        capture: RecordingAudioCapture(directory: dir),
+        processor: throwing,
+        meetingStore: MeetingStore(url: file)
+    )
+    let m = await vm1.startAsync(title: "Will fail")
+    await vm1.stopAsync()
+    check(e1.meeting(id: m.id)!.status == .failed, "session 1: meeting failed (pipeline threw)")
+
+    // Session 2: the failed meeting loads and the user can retry it.
+    let e2 = MeetingEngine(clock: clock)
+    let vm2 = TranscriberViewModel(
+        engine: e2,
+        capture: RecordingAudioCapture(directory: dir),
+        processor: FakeProcessor(),
+        meetingStore: MeetingStore(url: file)
+    )
+    check(vm2.meeting(id: m.id)!.status == .failed, "session 2: failed meeting loaded")
+    let retried = await vm2.retry(id: m.id)
+    check(retried, "session 2: retry succeeds with a working processor")
+    check(e2.meeting(id: m.id)!.status == .summarized, "session 2: now summarized after retry")
+}
+
+section("persistence: in-memory store seeds a fresh engine (test seam)")
+do {
+    let seed = Meeting(title: "Seeded", status: .summarized,
+        startedAt: t0, createdAt: t0, lastActivityAt: t0,
+        summary: MeetingSummary(overall: "Pre-existing."))
+    let e = MeetingEngine(clock: clock)
+    let vm = TranscriberViewModel(
+        engine: e,
+        capture: RecordingAudioCapture(directory: FileManager.default.temporaryDirectory),
+        processor: FakeProcessor(),
+        meetingStore: MeetingStore.inMemory(initial: [seed])
+    )
+    check(vm.meetings.count == 1, "in-memory seed hydrates the engine")
+    check(vm.meeting(id: seed.id)!.summary?.overall == "Pre-existing.", "seeded summary is visible")
+}
+
 // MARK: - Phase 3: error descriptions are actionable
 section("capture: error descriptions")
 check(AudioCaptureError.microphoneNotAuthorized.description.contains("Microphone"),

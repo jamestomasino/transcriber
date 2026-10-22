@@ -18,6 +18,31 @@ public final class MeetingEngine {
         self.clock = clock
     }
 
+    // MARK: - Hydration (persistence seam)
+    //
+    // `load(_:)` is called by the view model with the result of
+    // `MeetingStore.load()`. It hydrates the in-memory collection and
+    // reconciles any meeting that was mid-flight (`.recording` / `.processing`)
+    // at the last save to `.failed`. A meeting can never be recording or
+    // processing across a relaunch — the capture is gone and the pipeline is
+    // not running — so those are left retryable (`.failed`) rather than stuck.
+    // Summarized + already-failed meetings load untouched.
+    public func load(_ meetings: [Meeting], now: Date? = nil) {
+        let t = now ?? clock.now()
+        self.meetings = meetings.map { m in
+            var m = m
+            if m.status == .recording || m.status == .processing {
+                m.status = .failed
+                m.lastActivityAt = t
+            }
+            return m
+        }
+    }
+
+    /// The current collection in stored order (the view model persists this
+    /// verbatim, so the engine is the single source of ordering).
+    public var stored: [Meeting] { meetings }
+
     // MARK: - Queries
 
     public var all: [Meeting] { meetings }

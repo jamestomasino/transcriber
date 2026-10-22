@@ -5,15 +5,17 @@ from Zoom / Slack / Teams), transcribes it with speaker identification, generate
 a structured summary, and then **deletes the audio and the raw transcript,
 keeping only the summary.**
 
-> **Status:** Phase 4 (post-stop pipeline) in progress. The build, test
-> harness, pure core model + engine, the mic + system-audio capture path, and
-> the **transcribe → diarize → summarize → retention** pipeline are in place
-> and green (114 tests). Transcription is pluggable — **local Apple Speech**
-> (private, on-device, no key) by default, or **Deepgram** for accurate speaker
-> ID — and summarization runs on **OpenAI** or **Anthropic**. A
-> download-on-demand model store is in place for local-model backends. A live
-> level meter and a permission / capture status card are wired into the UI.
-> See [PLAN.md](PLAN.md).
+> **Status:** Phase 5 (persistence) in progress. The build, test harness, pure
+> core model + engine, the mic + system-audio capture path, the
+> **transcribe → diarize → summarize → retention** pipeline, and **durable
+> persistence** are in place and green (142 tests). Transcription is pluggable —
+> **local Apple Speech** (private, on-device, no key) by default, or **Deepgram**
+> for accurate speaker ID — and summarization runs on **OpenAI** or
+> **Anthropic**. A download-on-demand model store is in place for
+> local-model backends. A live level meter and a permission / capture status
+> card are wired into the UI. Meeting summaries now **survive a relaunch**
+> (`MeetingStore` → `meetings.json`), which is the product's core promise: the
+> summary is the only durable artifact. See [PLAN.md](PLAN.md).
 
 ## Features
 
@@ -23,6 +25,10 @@ keeping only the summary.**
 - Generate a structured summary: overall, key points, decisions, action items.
 - Save only the summary; delete the audio and transcript by default
   (`RetentionPolicy`; opt-in "keep transcript / keep audio" flags on `AppSettings`).
+- The summary is **durable**: meetings persist to `meetings.json` across
+  relaunches (`MeetingStore`). A meeting that was mid-flight (recording or
+  processing) when the app quit is reconciled to a retryable `.failed` state on
+  next launch.
 - Pluggable transcription + summarization backends (see Backends below).
 
 ## Backends
@@ -51,6 +57,11 @@ path uses Apple's on-device Speech and downloads nothing.
 - A summarization backend: an OpenAI or Anthropic API key (stored in the
   Keychain via `Keychain.set`). A Deepgram key is optional, only for the
   cloud transcription backend.
+- No network or account is required for the default path (local Speech +
+  a backend key for summarization). Meeting summaries persist to
+  `~/Library/Application Support/Transcriber/meetings.json` (with a
+  `meetings.json.bak` backup of the prior generation, plus a corrupt-file
+  fallback, so the summary — the only durable artifact — is recoverable).
 
 ## Build & run
 
@@ -69,8 +80,9 @@ an older installed SDK — this is expected and not a failure.
 ```
 Sources/Core/   Pure, AppKit-free core (Foundation only): model, engine, view
                 model, pipeline (transcribe → diarize → summarize), settings,
-                retention, model store, summary parser, and the pluggable
-                LLM / Deepgram backends. Fully unit-testable.
+                retention, persistence (MeetingStore → meetings.json), model
+                store, summary parser, and the pluggable LLM / Deepgram
+                backends. Fully unit-testable.
 Sources/App/    SwiftUI/AppKit shell (window + menu bar), plus the platform
                 pieces that Core stays pure of: real audio capture (AVFoundation),
                 local Speech transcription, the URLSession HTTP + model
