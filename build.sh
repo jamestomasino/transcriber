@@ -39,6 +39,7 @@ APP_SRC=(
   Sources/App/MeetingDetailView.swift
   Sources/App/SettingsView.swift
   Sources/App/RealAudioCapture.swift
+  Sources/App/SystemAudioTap.swift
   Sources/App/HTTPClient.swift
   Sources/App/AudioDevices.swift
   Sources/App/AudioPreparation.swift
@@ -131,6 +132,7 @@ cat > "${APP_DIR}/Contents/Info.plist" <<PLIST
     <key>NSPrincipalClass</key>        <string>NSApplication</string>
     <key>LSApplicationCategoryType</key> <string>public.app-category.productivity</string>
     <key>NSSpeechRecognitionUsageDescription</key> <string>Transcriber uses on-device speech recognition to turn meeting audio into text.</string>
+    <key>NSAudioCaptureUsageDescription</key> <string>Transcriber records system audio to transcribe other people’s voices in meetings. No screen or video is captured.</string>
     <key>NSMicrophoneUsageDescription</key> <string>Transcriber records your microphone so it can transcribe what you say during a meeting.</string>
 </dict>
 </plist>
@@ -212,7 +214,7 @@ if [ "$MODE" = "test" ]; then
   echo "==> Building + running media checks"
   swiftc -parse-as-library -target "$TARGET" -sdk "${WORKING_SDK:-$DEFAULT_SDK}" \
     -o "${BUILD}/app-checks" "${CORE_SRC[@]}" \
-    Sources/App/AppStorage.swift Sources/App/AudioPreparation.swift Sources/App/LocalTranscriber.swift Validation/AppChecks.swift
+    Sources/App/AppStorage.swift Sources/App/AudioPreparation.swift Sources/App/LocalTranscriber.swift Sources/App/SystemAudioTap.swift Validation/AppChecks.swift
   "${BUILD}/app-checks"
   echo
   echo "    Tests: ${BUILD}/tests"

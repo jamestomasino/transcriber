@@ -20,17 +20,18 @@ import TranscriberCore
 // Every API used here was verified against the installed macOS SDK before
 // being written (see PLAN.md §7):
 //   - Mic: `AVAudioEngine` input node tap → `AVAudioFile` (CAF).
-//   - System audio: `SCStream` + `capturesAudio`, delegate
+//   - System audio: Core Audio process tap on macOS 14.2+, otherwise
+//     `SCStream` + `capturesAudio`, delegate
 //     `stream(_:didOutputSampleBuffer:ofType:)`, buffer converted via
 //     `CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer`.
 //   - Mic permission: `AVAudioApplication.shared.recordPermission` /
 //     `AVAudioApplication.requestRecordPermission(_:)` (macOS; `AVAudioSession`
 //     is iOS-only and unavailable here).
-//   - Screen Recording: TCC-only, no Info.plist usage string required.
+//   - Audio taps use NSAudioCaptureUsageDescription; the legacy stream uses screen access.
 
 // MARK: - AVAudioCapture
 
-/// AVFoundation + ScreenCaptureKit capture. One instance per app; it runs one
+/// AVFoundation + Core Audio capture (ScreenCaptureKit on macOS 14.0–14.1). One instance per app; it runs one
 /// session at a time (the app only ever records one meeting).
 final class AVAudioCapture: AudioCapture, @unchecked Sendable {
     private let lock = NSLock()
@@ -96,7 +97,7 @@ final class AVAudioCapture: AudioCapture, @unchecked Sendable {
         guard startedAny else {
             throw AudioCaptureError.sourceFailed(
                 source: sources.first ?? .mic,
-                detail: "No audio source could be started (check microphone / Screen Recording permissions).")
+                detail: "No audio source could be started (check microphone / system audio permissions).")
         }
 
         lock.lock(); _session = session; lock.unlock()
@@ -121,7 +122,7 @@ final class AVAudioCapture: AudioCapture, @unchecked Sendable {
 
 // MARK: - Session
 
-/// A running capture: an optional mic engine and an optional SCStream.
+/// A running capture: an optional mic engine and a system audio tap or legacy SCStream.
 final class AVCaptureSession: AudioCaptureSession, @unchecked Sendable {
     private let directory: URL
     private let levelSink: (AudioSource, Float) -> Void
@@ -136,6 +137,7 @@ final class AVCaptureSession: AudioCaptureSession, @unchecked Sendable {
     private var micStarted = false
 
     // System audio.
+    private var audioTap: AnyObject? // SystemAudioTap on macOS 14.2+
     private var scStream: SCStream?
     private var scDelegate: SystemAudioDelegate?
     private var sysFile: AVAudioFile?
@@ -223,6 +225,11 @@ final class AVCaptureSession: AudioCaptureSession, @unchecked Sendable {
     // MARK: System audio
 
     func startSystemAudio() async throws {
+        if #available(macOS 14.2, *) {
+            try startAudioTap()
+            return
+        }
+        // Compatibility path for macOS 14.0–14.1 only.
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         guard let display = content.displays.first else {
             throw AudioCaptureError.noDisplayAvailable
@@ -291,6 +298,36 @@ final class AVCaptureSession: AudioCaptureSession, @unchecked Sendable {
         started = true
     }
 
+    @available(macOS 14.2, *)
+    private func startAudioTap() throws {
+        let tap = try SystemAudioTap()
+        let url = directory.appendingPathComponent("system.caf")
+        var file: AVAudioFile?
+        do {
+            let output = try AVAudioFile(forWriting: url, settings: tap.format.settings,
+                                         commonFormat: tap.format.commonFormat, interleaved: tap.format.isInterleaved)
+            file = output
+            let failure = errorSink
+            let levels = levelSink
+            try tap.start { buffer in
+                do { try output.write(from: buffer) }
+                catch { failure(.system, .sourceFailed(source: .system, detail: error.localizedDescription)) }
+                levels(.system, SystemAudioTap.level(buffer))
+            }
+            lock.lock()
+            audioTap = tap
+            sysFile = output
+            sysStarted = true
+            startOffsets[.system] = Date().timeIntervalSince(startedAt)
+            lock.unlock()
+        } catch {
+            tap.stop()
+            if let file { Self.closeAudioFile(file) }
+            try? FileManager.default.removeItem(at: url)
+            throw error
+        }
+    }
+
     var audio: CapturedAudio {
         lock.lock(); defer { lock.unlock() }
         var files: [AudioSource: URL] = [:]
@@ -323,6 +360,8 @@ final class AVCaptureSession: AudioCaptureSession, @unchecked Sendable {
         }
 
         if sys {
+            if #available(macOS 14.2, *), let tap = audioTap as? SystemAudioTap { tap.stop() }
+            audioTap = nil
             if let s = scStream {
                 await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
                     s.stopCapture { _ in cont.resume() }

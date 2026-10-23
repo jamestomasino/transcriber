@@ -24,6 +24,39 @@ struct AppChecks {
         } catch {}
         print("✓ Startup creates missing data folders, preserves existing data, and reports creation failures")
 
+        if #available(macOS 14.2, *) {
+            for interleaved in [true, false] {
+                let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 48000, channels: 2, interleaved: interleaved)!
+                let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 128)!
+                buffer.frameLength = 128
+                let buffers = UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList)
+                for entry in buffers { memset(entry.mData!, 0, Int(entry.mDataByteSize)) }
+                precondition(SystemAudioTap.level(buffer) == 0)
+                let stride = interleaved ? 2 : 1
+                for i in 0..<128 { buffer.floatChannelData![0][i * stride] = 0.25 }
+                precondition(abs(SystemAudioTap.level(buffer) - 0.25) < 0.0001)
+                for entry in buffers { memset(entry.mData!, 0, Int(entry.mDataByteSize)) }
+                for i in 0..<128 {
+                    if interleaved { buffer.floatChannelData![0][i * 2 + 1] = 0.25 }
+                    else { buffer.floatChannelData![1][i] = 0.25 }
+                }
+                precondition(abs(SystemAudioTap.level(buffer) - 0.25) < 0.0001, "Right-channel-only audio must verify access")
+                // Core Audio lends buffers to the callback. Check the no-copy
+                // wrapper preserves frame count and channel layout for writing.
+                let borrowed = AVAudioPCMBuffer(pcmFormat: format, bufferListNoCopy: buffer.audioBufferList)!
+                precondition(borrowed.frameLength == 128)
+                let fileURL = root.appendingPathComponent("tap-\(interleaved).caf")
+                var file: AVAudioFile? = try AVAudioFile(forWriting: fileURL, settings: format.settings,
+                                                       commonFormat: format.commonFormat, interleaved: interleaved)
+                try file!.write(from: borrowed)
+                if #available(macOS 15, *) { file!.close() }
+                file = nil
+                let recorded = try AVAudioFile(forReading: fileURL)
+                precondition(recorded.length == 128)
+            }
+            print("✓ Audio tap buffers preserve frame count, channel layout, signal level, and CAF output")
+        }
+
         let mic = root.appendingPathComponent("mic.wav")
         let system = root.appendingPathComponent("system.wav")
         try tone(to: mic, secondHalf: false)

@@ -4,7 +4,8 @@ import Speech
 import CoreGraphics
 
 /// Opt-in checks against this Mac's audio capture and on-device model. They
-/// never request permissions or use cloud keys. All audio stays in a temporary
+/// request audio permission only with --system-audio and never use cloud keys.
+/// All audio stays in a temporary
 /// managed recording directory and is removed even if validation throws.
 @main
 struct LiveChecks {
@@ -26,7 +27,13 @@ struct LiveChecks {
         say.waitUntilExit()
         guard say.terminationStatus == 0 else { throw SpeechError("Could not create the spoken fixture") }
 
-        if CGPreflightScreenCaptureAccess() {
+        if #available(macOS 14.2, *) {
+            if CommandLine.arguments.contains("--system-audio") {
+                try await checkSystem(root: root, speech: speech)
+            } else {
+                print("SKIP live system capture: use --system-audio to opt into audio-only permission and recording")
+            }
+        } else if CGPreflightScreenCaptureAccess() {
             try await checkSystem(root: root, speech: speech)
         } else {
             print("SKIP live system capture: Screen Recording permission is not granted")
@@ -73,7 +80,7 @@ struct LiveChecks {
         let samples = buffer.floatChannelData![0]
         let audible = (0..<Int(buffer.frameLength)).contains { abs(samples[$0]) > 0.001 }
         guard audible else { throw SpeechError("System recording contains only silence") }
-        print("✓ Live ScreenCaptureKit records audible system output")
+        print("✓ Live system capture records audible system output")
     }
 
 }

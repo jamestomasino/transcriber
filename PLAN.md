@@ -699,3 +699,24 @@ implementation audit is [docs/PLAN_REVIEW.md](docs/PLAN_REVIEW.md). In particula
 - Automated assertions and actual media exports pass. Live Speech authorization,
   an authenticated cloud end-to-end run, and distribution credentials are still
   required to finish those environment-dependent acceptance checks.
+
+## 20. Audio-only permission repair — 23 October 2026
+
+System capture now uses a private Core Audio process tap on macOS 14.2+,
+with `NSAudioCaptureUsageDescription`. It captures other apps without display
+enumeration or screen access. macOS 14.0–14.1 retains the ScreenCaptureKit path.
+Prepared audio and original capture files still follow the existing retention path.
+Tap I/O stops and drains before files close; the aggregate device and tap are
+removed after stop and on failed startup.
+
+Onboarding remembers permission requests across relaunch. Audio-only access is
+independent of `CGPreflightScreenCaptureAccess`; setup verifies incoming samples
+in memory, with no files. Silence is shown as unverified with retry guidance,
+not as permission denial or success. Local ad-hoc signing can invalidate privacy
+grants across rebuilds; a certificate identity remains the distribution path.
+
+Validation: the live tap captured audible `afplay` output into the managed
+recording and removed the fixture files. The isolated setup preview launched.
+The live Speech check was skipped for missing authorization; the separate live
+summary check returned `com.apple.SensitiveContentAnalysisML` error 15, so this
+run does not establish full transcription-to-summary acceptance.

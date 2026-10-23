@@ -3,17 +3,28 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 MODE="${1:-live}"
 case "$MODE" in
-  live) APP_SRC=(Sources/App/AudioDevices.swift Sources/App/RealAudioCapture.swift Sources/App/LocalTranscriber.swift Sources/App/LocalSummarizer.swift); ENTRY=Validation/LiveChecks.swift ;;
-  preview) APP_SRC=(Sources/App/ContentView.swift Sources/App/MeetingDetailView.swift Sources/App/SettingsView.swift Sources/App/OnboardingView.swift Sources/App/AudioDevices.swift Sources/App/HTTPClient.swift); ENTRY=Validation/Preview.swift ;;
-  *) echo 'Usage: bash Validation/run.sh live|preview [--empty]' >&2; exit 1 ;;
+  live) APP_SRC=(Sources/App/AudioDevices.swift Sources/App/RealAudioCapture.swift Sources/App/SystemAudioTap.swift Sources/App/LocalTranscriber.swift Sources/App/LocalSummarizer.swift); ENTRY=Validation/LiveChecks.swift ;;
+  preview) APP_SRC=(Sources/App/ContentView.swift Sources/App/MeetingDetailView.swift Sources/App/SettingsView.swift Sources/App/OnboardingView.swift Sources/App/SystemAudioTap.swift Sources/App/AudioDevices.swift Sources/App/HTTPClient.swift); ENTRY=Validation/Preview.swift ;;
+  *) echo 'Usage: bash Validation/run.sh live [--system-audio] | preview [--empty]' >&2; exit 1 ;;
 esac
 if [ ! -f build/sdk-path ]; then bash build.sh test; fi
 IFS= read -r VALIDATION_SDK < build/sdk-path
 BIN="build/validation-${MODE}"
-swiftc -parse-as-library -target "$(uname -m)-apple-macosx14.0" -sdk "$VALIDATION_SDK" \
-  -o "$BIN" Sources/Core/*.swift "${APP_SRC[@]}" "$ENTRY"
+LINK_FLAGS=()
 if [ "$MODE" = live ]; then
-  "$BIN"
+  # A console helper also needs the audio usage description before opting in.
+  LIVE_PLIST=build/validation-live-info.plist
+  cp build/Transcriber.app/Contents/Info.plist "$LIVE_PLIST"
+  /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier local.transcriber.live-validation' "$LIVE_PLIST"
+  /usr/libexec/PlistBuddy -c 'Set :CFBundleExecutable validation-live' "$LIVE_PLIST"
+  /usr/libexec/PlistBuddy -c 'Set :CFBundleName Transcriber Live Validation' "$LIVE_PLIST"
+  LINK_FLAGS=(-Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist
+    -Xlinker "$LIVE_PLIST")
+fi
+swiftc -parse-as-library -target "$(uname -m)-apple-macosx14.0" -sdk "$VALIDATION_SDK" \
+  "${LINK_FLAGS[@]}" -o "$BIN" Sources/Core/*.swift "${APP_SRC[@]}" "$ENTRY"
+if [ "$MODE" = live ]; then
+  "$BIN" "${@:2}"
 else
   BUNDLE=build/TranscriberValidation.app
   mkdir -p "$BUNDLE/Contents/MacOS"

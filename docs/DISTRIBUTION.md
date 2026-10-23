@@ -66,7 +66,7 @@ xcrun stapler validate build/Transcriber.app
 ditto -c -k --keepParent build/Transcriber.app build/Transcriber.zip
 ```
 
-Test the archive on another Mac: grant microphone, Screen Recording, and Speech
+Test the archive on another Mac: grant microphone, System Audio Recording (Screen Recording on macOS 14.0–14.1), and Speech
 Recognition as needed, record both sides of a call, and confirm summary
 persistence and retention after relaunch. Do not treat a successful notarization
 as proof that recording permissions and the meeting pipeline work.

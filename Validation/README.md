@@ -16,10 +16,14 @@ bash Validation/run.sh live
 ```
 
 This creates a spoken fixture with macOS `say`, plays it through `afplay`, and
-records system output when permission and an awake display are available. It
+records system output when screen permission and an awake display are available
+on macOS 14.0–14.1. On macOS 14.2+, explicitly opt into the audio-only live
+check with `bash Validation/run.sh live --system-audio`; this can request
+System Audio Recording access for the launching host. It
 also exercises Apple Intelligence with a real summary request. Speech is tested
 only when the launching process already has Speech Recognition authorization.
-The helper never requests permissions or uses cloud credentials. It prints
+The helper never uses cloud credentials; only `--system-audio` may request
+audio permission. It prints
 `SKIP` for unavailable capture or speech prerequisites; those lines are not
 successful acceptance checks. All generated audio is removed on normal exit.
 
@@ -42,14 +46,16 @@ Permission onboarding acceptance (use the normal app with permissions not yet
 requested, or a separate test bundle ID; do not reset the user's permissions):
 
 1. Open Setup and permissions before starting a meeting. Click Allow for
-   Microphone and Screen Recording, and for Speech Recognition if using local
+   Microphone and System Audio Recording (Screen Recording on macOS 14.0–14.1), and for Speech Recognition if using local
    transcription. Each must trigger its macOS permission request without
    creating a meeting or recording files.
-2. Grant access and check that the corresponding row shows a green checkmark.
+2. Grant access and play sound in another app during the system audio check.
+   A green checkmark requires actual audio; silence should show retry guidance.
    Return from System Settings to check that the panel refreshes. If macOS
-   requires a relaunch for screen recording, reopen the app and check again.
+   requires a relaunch, reopen the same app and check again. The request must
+   survive relaunch without requiring another Allow click.
 3. Deny access and verify that the row offers System Settings. For a previous
-   Screen Recording denial, the initial Allow attempt should reveal the
+   system audio denial, the initial Allow attempt should reveal the
    Settings link even though macOS does not repeat the prompt.
 4. Disable an audio source or switch to cloud transcription in app Settings and
    confirm that onboarding only offers the permissions needed by that setup.

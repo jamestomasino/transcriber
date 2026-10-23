@@ -8,7 +8,7 @@ import TranscriberCore
 @main
 struct TranscriberApp: App {
     /// Single shared view model so the main window and menu-bar item agree. Wired to the real AVFoundation +
-    /// ScreenCaptureKit capture and the real pipeline processor (chosen from
+    /// Core Audio system capture and the real pipeline processor (chosen from
     /// the user's settings).
     @StateObject private var vm: TranscriberViewModel
     @Environment(\.openWindow) private var openWindow

@@ -13,7 +13,7 @@ import TranscriberCore
 /// Recheck when the user returns from System Settings.
 struct OnboardingView: View {
     private enum PermissionStatus {
-        case notRequested, denied, allowed
+        case notRequested, denied, allowed, unverified
     }
 
     @ObservedObject var vm: TranscriberViewModel
@@ -22,7 +22,9 @@ struct OnboardingView: View {
     @State private var systemStatus = PermissionStatus.notRequested
     @State private var speechStatus = PermissionStatus.notRequested
     @State private var pendingPermission: String?
-    @State private var hasRequestedScreenAccess = false
+    @SwiftUI.AppStorage("systemAudioAccessRequested") private var hasRequestedAudioAccess = false
+    @SwiftUI.AppStorage("screenAccessRequested") private var hasRequestedScreenAccess = false
+    @State private var systemAccessDetail: String?
     @State private var checkingScreenAccess = false
 
     var body: some View {
@@ -34,9 +36,16 @@ struct OnboardingView: View {
                 permission("Microphone", detail: "Records your voice.", status: micStatus, pane: "Microphone", request: requestMicrophone)
             }
             if vm.settings.captureSystem {
-                permission("Screen Recording", detail: "Captures other people’s voices from apps. No video is saved.", status: systemStatus, pane: "ScreenCapture", request: requestScreenAccess)
+                permission(systemPermissionName, detail: "Captures other people’s voices from apps. No video is captured or saved.", status: systemStatus, pane: "ScreenCapture", request: requestSystemAccess)
+                if let systemAccessDetail {
+                    Text(systemAccessDetail).font(.caption).foregroundStyle(.secondary)
+                }
+                if systemStatus != .notRequested {
+                    Button(checkingScreenAccess ? "Checking audio…" : "Check audio again", action: requestSystemAccess)
+                        .disabled(checkingScreenAccess || vm.isRecording || vm.isStarting)
+                }
                 if systemStatus == .denied {
-                    Text("Enable Transcriber under Privacy & Security → Screen & System Audio Recording (Screen Recording on older macOS). If macOS asks, quit and reopen Transcriber to apply access.")
+                    Text("Enable Transcriber’s system audio access under Privacy & Security → Screen & System Audio Recording (Screen Recording on older macOS). If macOS asks, quit and reopen Transcriber to apply access.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
@@ -79,7 +88,7 @@ struct OnboardingView: View {
                 Button(pendingPermission == name ? "Requesting…" : "Allow…", action: request)
                     .accessibilityLabel("Allow \(name)")
                     .disabled(pendingPermission != nil)
-            } else if status == .denied {
+            } else if status == .denied || status == .unverified {
                 Button("System Settings") {
                     if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_\(pane)") {
                         NSWorkspace.shared.open(url)
@@ -109,12 +118,49 @@ struct OnboardingView: View {
         }
     }
 
-    private func requestScreenAccess() {
-        pendingPermission = "Screen Recording"
-        hasRequestedScreenAccess = true
-        systemStatus = CGRequestScreenCaptureAccess() ? .allowed : .denied
-        pendingPermission = nil
-        refresh()
+    private var systemPermissionName: String {
+        if #available(macOS 14.2, *) { return "System Audio Recording" }
+        return "Screen Recording"
+    }
+
+    private func requestSystemAccess() {
+        if #available(macOS 14.2, *) {
+            hasRequestedAudioAccess = true
+            refreshSystemAccess()
+        } else {
+            hasRequestedScreenAccess = true
+            systemStatus = CGRequestScreenCaptureAccess() ? .allowed : .denied
+            refreshScreenAccess()
+        }
+    }
+
+    private func refreshSystemAccess() {
+        guard !vm.isRecording, !vm.isStarting else { return }
+        if #available(macOS 14.2, *) {
+            // Remember the request across the restart required by System Settings.
+            // Never use screen preflight for the independent audio-only permission.
+            guard hasRequestedAudioAccess, !checkingScreenAccess else { return }
+            checkingScreenAccess = true
+            pendingPermission = systemPermissionName
+            systemAccessDetail = "Play sound in another app while access is checked. This check saves no audio."
+            Task { @MainActor in
+                defer { checkingScreenAccess = false; pendingPermission = nil }
+                do {
+                    if try await SystemAudioTap.checkAccess() {
+                        systemStatus = .allowed
+                        systemAccessDetail = "System audio received successfully."
+                    } else {
+                        systemStatus = .unverified
+                        systemAccessDetail = "No sound detected. Play audio in another app and check again. If it stays silent, enable System Audio Recording in System Settings, then quit and reopen Transcriber if macOS asks."
+                    }
+                } catch {
+                    systemStatus = .unverified
+                    systemAccessDetail = error.localizedDescription
+                }
+            }
+        } else {
+            refreshScreenAccess()
+        }
     }
 
     private func refreshScreenAccess() {
@@ -128,7 +174,7 @@ struct OnboardingView: View {
             else if systemStatus == .allowed { systemStatus = .denied }
             return
         }
-        guard !checkingScreenAccess, pendingPermission != "Screen Recording" else { return }
+        guard !checkingScreenAccess, pendingPermission != systemPermissionName else { return }
         checkingScreenAccess = true
         Task { @MainActor in
             defer { checkingScreenAccess = false }
@@ -153,7 +199,7 @@ struct OnboardingView: View {
         case .undetermined: micStatus = .notRequested
         default: micStatus = .denied
         }
-        refreshScreenAccess()
+        refreshSystemAccess()
         switch SFSpeechRecognizer.authorizationStatus() {
         case .authorized: speechStatus = .allowed
         case .notDetermined: speechStatus = .notRequested

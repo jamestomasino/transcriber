@@ -48,9 +48,9 @@ The summary is the only thing that sticks around. That's the point.
 
 - **macOS 14 or later** (Apple Silicon or Intel).
 - **Microphone access** — use Allow in onboarding, or macOS asks on your first recording.
-- **Screen Recording access** — needed to capture *system* audio
-  (System Settings → Privacy & Security → Screen Recording). Not needed if you
-  only want your own microphone.
+- **System Audio Recording access** — needed to capture other apps on macOS 14.2+.
+  Use Allow in Setup and permissions; no screen or video is captured. macOS
+  14.0–14.1 uses Screen Recording access instead. Neither is needed for mic-only recording.
 - **Speech Recognition** (for on-device transcription) —
   System Settings → Privacy & Security → Speech Recognition.
 - **A summarization backend** — one of:
@@ -168,8 +168,19 @@ key in Settings, or switch the summary backend to **Local** (macOS 26+) and
 retry the meeting from its detail pane.
 
 **"It captured my voice but not the other side."**
-System audio needs **Screen Recording** permission. Grant it in System Settings
-→ Privacy & Security → Screen Recording, then start a new meeting.
+Open **Setup and permissions → System Audio Recording → Allow**. On macOS
+14.2+, the app uses an audio-only Core Audio tap; screen recording access is
+not required. In System Settings → Privacy & Security → Screen & System Audio
+Recording, enable Transcriber’s audio access. Quit and reopen the same app if
+macOS asks. Play sound in another app and click **Check audio again**; a green
+check means actual system audio was received. Silence alone cannot distinguish
+an idle app from missing permission. macOS 14.0–14.1 still uses Screen Recording.
+
+Local builds are ad-hoc signed by default. Rebuilding changes their code identity
+and can invalidate macOS privacy grants even when the Settings toggle stays on.
+Grant access to the current app copy; for a consistent identity across builds,
+set `TRANSCRIBER_SIGN_IDENTITY` to a code-signing certificate (see
+[distribution](docs/DISTRIBUTION.md)).
 
 **"The Local summary option is greyed out / errors with 'use OpenAI or Anthropic'."**
 The on-device summarizer requires **macOS 26+ with Apple Intelligence enabled**.
@@ -218,7 +229,7 @@ Sources/Core/   Pure, AppKit-free core (Foundation only): the model, engine,
                 pluggable backends. Fully unit-testable.
 Sources/App/    The SwiftUI/AppKit shell (window, menu bar, detail pane,
                 settings) plus the platform pieces Core stays pure of: real
-                audio capture (ScreenCaptureKit), on-device Speech,
+                audio capture (Core Audio taps, with a ScreenCaptureKit fallback), on-device Speech,
                 on-device summarization (FoundationModels), URLSession + retry,
                 Keychain-backed keys, and notifications.
 Tests/          Custom assertion-based test harness (no XCTest).
