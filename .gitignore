@@ -13,3 +13,6 @@ DerivedData/
 
 # macOS
 .DS_Store
+
+# Local distribution secrets (see .env.example; never commit the real one)
+.env

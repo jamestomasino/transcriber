@@ -132,9 +132,55 @@ PLIST
 echo "==> Writing PkgInfo"
 printf 'APPL????' > "${APP_DIR}/Contents/PkgInfo"
 
-echo "==> Ad-hoc code signing (required to launch a GUI app)"
-codesign --force --deep --sign - "${APP_DIR}" 2>/dev/null || \
-  echo "    (codesign skipped/failed; app may still run)"
+# Sign the .app. Defaults to ad-hoc (runs only on the machine that built it).
+# If TRANSCRIBER_SIGN_IDENTITY is set, sign with that identity + hardened
+# runtime — the path needed for notarization and distribution to other Macs.
+# See docs/DISTRIBUTION.md.
+sign_app() {
+  local app="$1"
+  if [ -n "${TRANSCRIBER_SIGN_IDENTITY:-}" ]; then
+    echo "==> Code signing with: ${TRANSCRIBER_SIGN_IDENTITY} (hardened runtime)"
+    codesign --force --deep --options runtime --sign "${TRANSCRIBER_SIGN_IDENTITY}" "${app}"
+  else
+    echo "==> Ad-hoc code signing (runs only on this machine; set TRANSCRIBER_SIGN_IDENTITY to distribute)"
+    codesign --force --deep --sign - "${app}" 2>/dev/null || \
+      echo "    (codesign skipped/failed; app may still run)"
+  fi
+}
+
+# Notarize + staple an already-signed .app. Requires TRANSCRIBER_SIGN_IDENTITY
+# to have been used (hardened runtime) and one notarization credential set.
+notarize_app() {
+  local app="$1"
+  local zip; zip="$(mktemp /tmp/transcriber.XXXXXX).zip"
+  ( cd "$(dirname "${app}")" && zip -qX "${zip}" "$(basename "${app}")" )
+  echo "==> Notarizing $(basename "${app}") …"
+  if [ -n "${TRANSCRIBER_ASC_KEY_PATH:-}" ]; then
+    xcrun notarytool submit "${zip}" \
+      --key "${TRANSCRIBER_ASC_KEY_PATH}" \
+      --key-id "${TRANSCRIBER_ASC_KEY_ID:?TRANSCRIBER_ASC_KEY_ID required}" \
+      --issuer "${TRANSCRIBER_ASC_ISSUER:?TRANSCRIBER_ASC_ISSUER required}" \
+      --wait
+  elif [ -n "${TRANSCRIBER_APPLE_ID:-}" ]; then
+    xcrun notarytool submit "${zip}" \
+      --username "${TRANSCRIBER_APPLE_ID}" \
+      --password "${TRANSCRIBER_APPLE_PW:?TRANSCRIBER_APPLE_PW required}" \
+      --wait
+  else
+    echo "    ERROR: no notarization credentials. Set TRANSCRIBER_ASC_* or TRANSCRIBER_APPLE_ID." >&2
+    rm -f "${zip}"; return 1
+  fi
+  echo "==> Stapling ticket"
+  xcrun stapler staple "${app}"
+  rm -f "${zip}"
+}
+
+sign_app "${APP_DIR}"
+
+# If we just built with a real identity and notarization is enabled, do it now.
+if [ -n "${TRANSCRIBER_SIGN_IDENTITY:-}" ] && [ "${TRANSCRIBER_NOTARIZE:-0}" = "1" ]; then
+  notarize_app "${APP_DIR}"
+fi
 
 MODE="${1:-build}"
 
