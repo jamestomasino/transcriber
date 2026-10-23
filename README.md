@@ -30,10 +30,9 @@ The summary is the only thing that sticks around. That's the point.
   identify different people.
 - **A structured summary.** Overall, key points, decisions, and action items —
   not a wall of text.
-- **A fully local option.** Choose Local transcription (Apple Speech) and Local
-  summarization (Apple Intelligence) to keep the whole pipeline on your Mac.
-  No account or API key. Local transcription is the default; summaries default
-  to OpenAI until you change the backend in Settings.
+- **Local by default.** Transcription (Apple Speech) and summarization (Apple
+  Intelligence) start with Local selected to keep the whole pipeline on your
+  Mac. No account or API key. The initial language code is `en`.
 - **Cloud when you want it.** Swap in Deepgram (best speaker ID) or
   OpenAI / Anthropic (stronger summaries) with a key — or mix and match per
   stage.
@@ -48,7 +47,7 @@ The summary is the only thing that sticks around. That's the point.
 ## Requirements
 
 - **macOS 14 or later** (Apple Silicon or Intel).
-- **Microphone access** — macOS asks on your first recording.
+- **Microphone access** — use Allow in onboarding, or macOS asks on your first recording.
 - **Screen Recording access** — needed to capture *system* audio
   (System Settings → Privacy & Security → Screen Recording). Not needed if you
   only want your own microphone.
@@ -59,10 +58,9 @@ The summary is the only thing that sticks around. That's the point.
     needs **macOS 26+** with Apple Intelligence enabled, or
   - **OpenAI** or **Anthropic**: an API key (stored in your macOS Keychain).
 
-> **The one decision that matters most:** the app ships with a **local
-> transcriber** (no key needed) but an **OpenAI summarizer** (needs a key) as
-> the default. So out of the box you'll either add an OpenAI key, or switch the
-> summary backend to **Local** for a fully offline setup. See [Backends](#backends)
+> First startup selects **Local** for both transcription and summaries. Local
+> summaries need macOS 26+ with Apple Intelligence enabled. On older systems,
+> choose a cloud summary backend and add its API key. See [Backends](#backends)
 > and [Getting started](#getting-started).
 
 ---
@@ -104,7 +102,7 @@ Transcription and summarization are **independent** — pick any combination.
 | ------------ | ------------- | --------------- | ------------ | --------------------------------------- |
 | **Transcribe** | **Local**   | On your Mac     | No           | Apple Speech. Private, offline. Default. |
 | **Transcribe** | **Deepgram**| Cloud          | Yes (Deepgram) | Nova with native diarization — the most accurate speaker IDs. |
-| **Summarize**  | **Local**   | On your Mac     | No           | Apple Intelligence. Offline. **macOS 26+.** |
+| **Summarize**  | **Local**   | On your Mac     | No           | Apple Intelligence. Offline. Default. **macOS 26+.** |
 | **Summarize**  | **OpenAI**  | Cloud           | Yes (OpenAI) | Any chat model (default: `gpt-4o-mini`). |
 | **Summarize**  | **Anthropic** | Cloud          | Yes (Anthropic) | Any Claude model.                        |
 
@@ -126,16 +124,21 @@ rather than echoing the secret back.
 - **The summary is the only durable artifact.** By default, right after the
   summary is written, Transcriber **deletes the audio and the transcript** and
   removes the per-meeting recording folder. A startup sweep clears any recording
-  directory that outlived its meeting, so nothing leaks into your Application
-  Support folder.
+  directory that outlived its meeting within the managed data folder.
 - **Opt in to keep more** if you want to: Settings → *Storage* → "Keep
   transcript after summary" / "Keep audio after summary."
 - **Your summaries persist** to `meetings.json` (with a one-generation backup
   and a corrupt-file fallback), so they survive a relaunch.
 - **Choose where data goes** in Settings → *Storage* → **Data location**. The
-  default is `~/Library/Application Support/Transcriber`; pick a folder or
+  first-run default is `~/Documents/Transcriber`; pick a folder or
   **Reset** to return to the default. Restart to use the chosen location.
+  The app creates the selected folder automatically on startup if needed.
+  Meeting audio lives in `recordings/yyyyMMdd-HHmm-<meeting-id>/`, using the
+  local meeting start time so folders sort by date. The ID keeps meetings
+  started in the same minute distinct. Existing ID-only folders remain supported.
   Existing meetings stay in their original folder; this does not migrate them.
+  Existing installations using Application Support keep that location until
+  you choose another folder or Reset. Preferences stay in Application Support.
 - **Cloud backends send audio / transcript to that provider** (Deepgram, OpenAI,
   or Anthropic) to do their job. Local backends send nothing anywhere.
 

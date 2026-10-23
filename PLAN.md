@@ -682,11 +682,15 @@ Each phase ends in a **buildable, testable** state (`bash build.sh test`).
 The original sections above preserve the design history. The authoritative
 implementation audit is [docs/PLAN_REVIEW.md](docs/PLAN_REVIEW.md). In particular:
 
-- Defaults are local Apple Speech transcription and OpenAI summaries. Fully
-  local summarization is selectable with Apple Intelligence; local speaker
-  labeling remains approximate.
+- First-run defaults are local Apple Speech transcription, local Apple
+  Intelligence summaries, language `en`, and `~/Documents/Transcriber` storage.
+  Saved settings and legacy Application Support storage remain unchanged.
+  Local summaries require macOS 26+ with Apple Intelligence enabled; local
+  speaker labeling remains approximate.
 - Summary saves precede deletion, and pending cleanup decisions survive a crash.
   Failed cleanup can be retried without repeating provider requests.
+- New recording folders use `yyyyMMdd-HHmm-<meeting-id>` in local start time.
+  Cleanup supports both dated and legacy ID-only folders.
 - Audio devices, source toggles, settings, retention, search, detail actions,
   timers, onboarding, notifications, and toasts are implemented.
 - Local long meetings use section summaries; cloud requests retain their

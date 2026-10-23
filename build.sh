@@ -34,6 +34,7 @@ CORE_SRC=(
 )
 APP_SRC=(
   Sources/App/TranscriberApp.swift
+  Sources/App/AppStorage.swift
   Sources/App/ContentView.swift
   Sources/App/MeetingDetailView.swift
   Sources/App/SettingsView.swift
@@ -211,7 +212,7 @@ if [ "$MODE" = "test" ]; then
   echo "==> Building + running media checks"
   swiftc -parse-as-library -target "$TARGET" -sdk "${WORKING_SDK:-$DEFAULT_SDK}" \
     -o "${BUILD}/app-checks" "${CORE_SRC[@]}" \
-    Sources/App/AudioPreparation.swift Sources/App/LocalTranscriber.swift Validation/AppChecks.swift
+    Sources/App/AppStorage.swift Sources/App/AudioPreparation.swift Sources/App/LocalTranscriber.swift Validation/AppChecks.swift
   "${BUILD}/app-checks"
   echo
   echo "    Tests: ${BUILD}/tests"

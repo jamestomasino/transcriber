@@ -68,14 +68,14 @@ public struct AppSettings: Codable, Equatable, Sendable {
         captureSystem: Bool = true,
         inputDeviceID: String? = nil,
         inputDeviceName: String? = nil,
-        storageDirectory: URL? = nil,
+        storageDirectory: URL? = StorageDirectory.defaultDirectory,
         keepTranscriptAfterSummary: Bool = false,
         keepAudioAfterSummary: Bool = false,
         transcriptionBackend: TranscriptionBackend = .local,
         whisperModel: String = "whisper-base",
-        language: String = "",
-        summaryBackend: SummaryBackend = .openai,
-        summaryModel: String = "gpt-4o-mini",
+        language: String = "en",
+        summaryBackend: SummaryBackend = .local,
+        summaryModel: String? = nil,
         promptOverride: String? = nil,
         showToasts: Bool = true,
         notifyOnSummary: Bool = true
@@ -91,7 +91,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.whisperModel = whisperModel
         self.language = language
         self.summaryBackend = summaryBackend
-        self.summaryModel = summaryModel
+        self.summaryModel = summaryModel ?? Self.defaultSummaryModel(for: summaryBackend)
         self.promptOverride = promptOverride
         self.showToasts = showToasts
         self.notifyOnSummary = notifyOnSummary
@@ -130,6 +130,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
         captureSystem = try d.decodeIfPresent(Bool.self, forKey: .captureSystem) ?? def.captureSystem
         inputDeviceID = try d.decodeIfPresent(String.self, forKey: .inputDeviceID)
         inputDeviceName = try d.decodeIfPresent(String.self, forKey: .inputDeviceName)
+        // Older settings omitted this key for Application Support. Preserve
+        // that location so upgrading does not disconnect existing history.
         storageDirectory = try d.decodeIfPresent(URL.self, forKey: .storageDirectory)
         keepTranscriptAfterSummary = try d.decodeIfPresent(Bool.self, forKey: .keepTranscriptAfterSummary) ?? def.keepTranscriptAfterSummary
         keepAudioAfterSummary = try d.decodeIfPresent(Bool.self, forKey: .keepAudioAfterSummary) ?? def.keepAudioAfterSummary
@@ -137,7 +139,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         whisperModel = try d.decodeIfPresent(String.self, forKey: .whisperModel) ?? def.whisperModel
         language = try d.decodeIfPresent(String.self, forKey: .language) ?? def.language
         summaryBackend = try d.decodeIfPresent(SummaryBackend.self, forKey: .summaryBackend) ?? def.summaryBackend
-        summaryModel = try d.decodeIfPresent(String.self, forKey: .summaryModel) ?? def.summaryModel
+        summaryModel = try d.decodeIfPresent(String.self, forKey: .summaryModel) ?? Self.defaultSummaryModel(for: summaryBackend)
         promptOverride = try d.decodeIfPresent(String.self, forKey: .promptOverride)
         showToasts = try d.decodeIfPresent(Bool.self, forKey: .showToasts) ?? def.showToasts
         notifyOnSummary = try d.decodeIfPresent(Bool.self, forKey: .notifyOnSummary) ?? def.notifyOnSummary

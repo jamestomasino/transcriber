@@ -135,10 +135,11 @@ The optional prompt-override field remains reserved; all backends use the
 shared summary contract. Per-source gain and additional transcription providers
 remain the optional alternatives described in the original plan.
 
-The defaults are deliberately unchanged: local transcription and an OpenAI
-summary requiring a key. Fully local processing is an option requiring a
-suitable Apple Intelligence installation. The contradictory README claim that
-the default was already fully offline has been corrected.
+First-run defaults now select local transcription and local summaries, with
+language `en` and data in `~/Documents/Transcriber`. Local summaries require a
+suitable Apple Intelligence installation. Saved backend and language choices
+are preserved; older settings without a data-location key continue to resolve
+to Application Support so existing history remains accessible.
 
 ## Build, tests, and distribution — §§14, 17–18
 

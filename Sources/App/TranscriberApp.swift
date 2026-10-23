@@ -16,8 +16,16 @@ struct TranscriberApp: App {
     init() {
         let settingsStore = SettingsStore(url: Self.settingsURL)
         let settings = settingsStore.load()
+        let storageError: String?
+        do {
+            try AppStorage.prepare(settings: settings)
+            storageError = nil
+        } catch {
+            storageError = "Could not create the data folder at \(StorageDirectory.base(settings: settings).path). \(error.localizedDescription) Choose an accessible folder in Settings → Storage, then restart Transcriber."
+        }
         // The data directory (meetings.json + recordings/) is resolved from
-        // settings: custom if the user set one, otherwise Application Support.
+        // settings: Documents/Transcriber on first startup, a chosen folder,
+        // or Application Support for saved settings with the legacy nil path.
         // settings.json itself always lives in Application Support so the app
         // can find it on launch regardless of the data location.
         let meetingStore = MeetingStore(url: StorageDirectory.meetingsURL(settings: settings))
@@ -30,6 +38,7 @@ struct TranscriberApp: App {
             settings: settings,
             settingsStore: settingsStore,
             meetingStore: meetingStore,
+            startupError: storageError,
             // Rebuild the pipeline from the *current* settings at run time so
             // switching backend / model in Settings takes effect on the next
             // meeting without a relaunch. Keys are read lazily from the Keychain

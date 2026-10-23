@@ -38,6 +38,22 @@ launching another; the normal app can remain running.
 `run.sh` reuses the SDK selected by the last `build.sh` invocation (recorded in
 `build/sdk-path`). Run `bash build.sh test` again after changing installed SDKs.
 
+Permission onboarding acceptance (use the normal app with permissions not yet
+requested, or a separate test bundle ID; do not reset the user's permissions):
+
+1. Open Setup and permissions before starting a meeting. Click Allow for
+   Microphone and Screen Recording, and for Speech Recognition if using local
+   transcription. Each must trigger its macOS permission request without
+   creating a meeting or recording files.
+2. Grant access and check that the corresponding row shows a green checkmark.
+   Return from System Settings to check that the panel refreshes. If macOS
+   requires a relaunch for screen recording, reopen the app and check again.
+3. Deny access and verify that the row offers System Settings. For a previous
+   Screen Recording denial, the initial Allow attempt should reveal the
+   Settings link even though macOS does not repeat the prompt.
+4. Disable an audio source or switch to cloud transcription in app Settings and
+   confirm that onboarding only offers the permissions needed by that setup.
+
 Final manual acceptance in the normal app still requires a real recording with
 microphone and system audio, Speech permission or a Deepgram key, and a usable
 summary backend. Verify the resulting summary, retry/cancel behavior, removal of

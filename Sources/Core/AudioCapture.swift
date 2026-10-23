@@ -62,7 +62,7 @@ public protocol AudioCapture: Sendable {
 // Foundation-only, so the view model (Core) and the test harness can compute
 // the canonical location without touching the App layer.
 
-/// Where a meeting's raw audio files live: `…/Transcriber/recordings/<id>/`.
+/// Where raw audio lives: `…/Transcriber/recordings/yyyyMMdd-HHmm-<id>/`.
 ///
 /// `baseDirectory` is injectable so tests can point it at a temp dir without
 /// touching the user's real Application Support.
@@ -77,8 +77,23 @@ public enum RecordingsDirectory {
             .appendingPathComponent("recordings", isDirectory: true)
     }
 
-    public static func forMeeting(_ id: UUID) -> URL {
-        base().appendingPathComponent(id.uuidString, isDirectory: true)
+    public static func forMeeting(_ meeting: Meeting, timeZone: TimeZone = .current) -> URL {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = timeZone
+        formatter.dateFormat = "yyyyMMdd-HHmm"
+        let prefix = formatter.string(from: meeting.startedAt)
+        return base().appendingPathComponent("\(prefix)-\(meeting.id.uuidString)", isDirectory: true)
+    }
+
+    /// Recognize only our dated names and the original UUID-only names.
+    static func meetingID(inDirectoryName name: String) -> UUID? {
+        if let legacy = UUID(uuidString: name) { return legacy }
+        guard name.count == 50,
+              name.range(of: #"^[0-9]{8}-[0-9]{4}-"#, options: .regularExpression) != nil
+        else { return nil }
+        return UUID(uuidString: String(name.dropFirst(14)))
     }
 
     /// The per-meeting directories that are safe to delete at startup.
@@ -89,7 +104,7 @@ public enum RecordingsDirectory {
     /// "keep only the summary" promise made testable without I/O.
     ///
     /// A directory is an orphan when:
-    /// - its name is a UUID (so we never touch anything we didn't create), and
+    /// - its name matches our dated or legacy UUID format, and
     /// - it is not a *live* meeting's directory (`liveIDs`), OR it is a live
     ///   meeting's directory but is already **empty** (a leftover from a build
     ///   that summarized the meeting but never cleaned the dir up).
@@ -107,7 +122,7 @@ public enum RecordingsDirectory {
         for entry in entries {
             guard let isDir = try? entry.resourceValues(forKeys: [.isDirectoryKey]).isDirectory,
                   isDir,
-                  let uuid = UUID(uuidString: entry.lastPathComponent)
+                  let uuid = meetingID(inDirectoryName: entry.lastPathComponent)
             else { continue }
 
             if !liveIDs.contains(uuid) {
@@ -147,15 +162,24 @@ public extension AudioCaptureSession {
 // and recordings — is stored, which is what the DoD's "summary save location"
 // preference is about.
 //
-// `storageDirectory == nil` (the default) → ~/Library/Application Support/Transcriber/
+// New settings → ~/Documents/Transcriber/
+// `storageDirectory == nil` (legacy default) → ~/Library/Application Support/Transcriber/
 // `storageDirectory == /path/to/dir` → that directory is the Transcriber data root.
 
 public enum StorageDirectory {
+    /// New installations keep their data together inside Documents.
+    public static var defaultDirectory: URL {
+        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Documents", isDirectory: true)
+        return documents.appendingPathComponent("Transcriber", isDirectory: true)
+    }
+
     /// The Transcriber data root for the given settings.
     public static func base(settings: AppSettings) -> URL {
         if let custom = settings.storageDirectory {
             return custom
         }
+        // A nil location in existing settings means the original default.
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
         return appSupport.appendingPathComponent("Transcriber", isDirectory: true)
@@ -330,14 +354,26 @@ public struct MeetingArtifacts: MeetingArtifactManaging {
     }
 
     public func removeEmptyDirectory(for id: UUID) throws {
-        let dir = RecordingsDirectory.forMeeting(id)
-        guard FileManager.default.fileExists(atPath: dir.path) else { return }
-        let contents = try FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)
-        if contents.isEmpty { try FileManager.default.removeItem(at: dir) }
+        for dir in try directories(for: id) {
+            let contents = try FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)
+            if contents.isEmpty { try FileManager.default.removeItem(at: dir) }
+        }
     }
 
     public func discard(_ meeting: Meeting) throws {
         try remove(RetentionPolicy(settings: AppSettings()).artifactsToDelete(for: meeting))
-        try remove([RecordingsDirectory.forMeeting(meeting.id)])
+        try remove(directories(for: meeting.id))
+    }
+
+    /// Look up by ID so cleanup also works after a timezone change or upgrade.
+    private func directories(for id: UUID) throws -> [URL] {
+        let base = RecordingsDirectory.base()
+        guard FileManager.default.fileExists(atPath: base.path) else { return [] }
+        return try FileManager.default.contentsOfDirectory(
+            at: base, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]
+        ).filter {
+            guard RecordingsDirectory.meetingID(inDirectoryName: $0.lastPathComponent) == id else { return false }
+            return try $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true
+        }
     }
 }

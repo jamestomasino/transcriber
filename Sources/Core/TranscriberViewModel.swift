@@ -34,7 +34,7 @@ public final class TranscriberViewModel: ObservableObject {
     /// bar). nil when not processing.
     @Published public private(set) var processingProgress: ProcessingProgress?
     @Published public private(set) var progressByMeeting: [UUID: ProcessingProgress] = [:]
-    /// A human-readable processing error, when the last pipeline run failed.
+    /// A human-readable startup, storage, or processing error.
     @Published public private(set) var processingError: String?
 
     private let engine: MeetingEngine
@@ -83,6 +83,7 @@ public final class TranscriberViewModel: ObservableObject {
         settings: AppSettings = AppSettings(),
         settingsStore: SettingsStore? = nil,
         meetingStore: MeetingStore? = nil,
+        startupError: String? = nil,
         processorFactory: ((AppSettings) -> any MeetingProcessor)? = nil,
         notifier: ((MeetingNotification) -> Void)? = nil,
         artifacts: any MeetingArtifactManaging = MeetingArtifacts()
@@ -96,6 +97,7 @@ public final class TranscriberViewModel: ObservableObject {
         self.settings = settings
         self.settingsStore = settingsStore
         self.meetingStore = meetingStore
+        self.processingError = startupError
         // Hydrate from disk if a store was supplied (reconciling mid-flight
         // meetings to .failed), then reflect the loaded state in the UI.
         if let store = meetingStore {
@@ -106,7 +108,7 @@ public final class TranscriberViewModel: ObservableObject {
         // Backstop for the retention promise: remove any per-meeting recording
         // directories that outlived their meeting (a prior build that cleaned
         // the audio files but not the dir, or a crash mid-pipeline). This is
-        // idempotent and safe — it only touches UUID-named dirs that aren't a
+        // idempotent and safe — it only touches managed meeting dirs that aren't a
         // live meeting's (or are a live meeting's but already empty).
         self.sweepOrphanRecordings()
         // Resume a cleanup interrupted after the summary was safely saved.
@@ -189,7 +191,7 @@ public final class TranscriberViewModel: ObservableObject {
             guard !sources.isEmpty else {
                 throw AudioCaptureError.sourceFailed(source: .mic, detail: "Choose at least one audio source in Settings → Audio.")
             }
-            let dir = RecordingsDirectory.forMeeting(meeting.id)
+            let dir = RecordingsDirectory.forMeeting(meeting)
             let s = try await capture.start(sources: sources, directory: dir)
             self.session = s
             self.sessionMeetingID = meeting.id

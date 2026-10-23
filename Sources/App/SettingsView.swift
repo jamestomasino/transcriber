@@ -118,7 +118,7 @@ struct SettingsView: View {
 // MARK: - Storage directory row
 //
 // Lets the user pick a custom directory for Transcriber data (meetings.json
-// + recordings/). The default is Application Support. Uses NSOpenPanel
+// + recordings/). New installations default to Documents/Transcriber. Uses NSOpenPanel
 // (AppKit) for the directory chooser — the only place in the app that needs
 // AppKit for a file dialog.
 private struct StorageDirectoryRow: View {
@@ -136,9 +136,9 @@ private struct StorageDirectoryRow: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
             Button("Choose…") { chooseDirectory() }
-            if vm.settings.storageDirectory != nil {
+            if vm.settings.storageDirectory != StorageDirectory.defaultDirectory {
                 Button("Reset", role: .destructive) {
-                    vm.updateSettings { $0.storageDirectory = nil }
+                    vm.updateSettings { $0.storageDirectory = StorageDirectory.defaultDirectory }
                 }
             }
         }
@@ -149,10 +149,7 @@ private struct StorageDirectoryRow: View {
     }
 
     private var displayPath: String {
-        if let dir = vm.settings.storageDirectory {
-            return dir.path
-        }
-        return "Default (Application Support)"
+        StorageDirectory.base(settings: vm.settings).path
     }
 
     private func chooseDirectory() {
@@ -162,9 +159,7 @@ private struct StorageDirectoryRow: View {
         panel.allowsMultipleSelection = false
         panel.prompt = "Choose"
         panel.message = "Choose where Transcriber stores its data (meetings + recordings)."
-        if let current = vm.settings.storageDirectory {
-            panel.directoryURL = current
-        }
+        panel.directoryURL = StorageDirectory.base(settings: vm.settings)
         if panel.runModal() == .OK, let url = panel.url {
             vm.updateSettings { $0.storageDirectory = url }
         }

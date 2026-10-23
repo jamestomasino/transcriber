@@ -8,6 +8,22 @@ struct AppChecks {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("transcriber-media-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
+        let dataRoot = root.appendingPathComponent("Documents/Transcriber", isDirectory: true)
+        let settings = AppSettings(storageDirectory: dataRoot)
+        try AppStorage.prepare(settings: settings)
+        var isDirectory: ObjCBool = false
+        precondition(FileManager.default.fileExists(atPath: dataRoot.path, isDirectory: &isDirectory) && isDirectory.boolValue)
+        let existing = dataRoot.appendingPathComponent("meetings.json")
+        try Data("existing history".utf8).write(to: existing)
+        try AppStorage.prepare(settings: settings)
+        let preserved = try Data(contentsOf: existing)
+        precondition(preserved == Data("existing history".utf8))
+        do {
+            try AppStorage.prepare(settings: AppSettings(storageDirectory: existing))
+            preconditionFailure("A file cannot be used as a data folder")
+        } catch {}
+        print("✓ Startup creates missing data folders, preserves existing data, and reports creation failures")
+
         let mic = root.appendingPathComponent("mic.wav")
         let system = root.appendingPathComponent("system.wav")
         try tone(to: mic, secondHalf: false)

@@ -704,7 +704,18 @@ do {
     check(def.transcriptionBackend == .local, "default backend is local (private)")
     check(def.keepTranscriptAfterSummary == false, "default: transcript not kept")
     check(def.keepAudioAfterSummary == false, "default: audio not kept")
-    check(def.summaryBackend == .openai, "default summary backend is openai")
+    check(def.summaryBackend == .local, "default summary backend is local")
+    check(def.summaryModel.isEmpty, "local summary uses the on-device model")
+    check(def.language == "en", "default language is English")
+    check(def.storageDirectory == StorageDirectory.defaultDirectory, "new settings select Documents storage")
+    let fresh = SettingsStore(url: suiteRoot.appendingPathComponent("first-run/settings.json")).load()
+    check(fresh == def, "first startup without saved settings uses the new defaults")
+    let startupVM = TranscriberViewModel(capture: RecordingAudioCapture(directory: suiteRecordings),
+                                        startupError: "Could not create the data folder")
+    check(startupVM.processingError == "Could not create the data folder", "startup storage failures are visible to the UI")
+    check(try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(def)) == def,
+          "new defaults survive settings serialization")
+    check(AppSettings(summaryBackend: .openai).summaryModel == "gpt-4o-mini", "explicit cloud backend selects its compatible model")
     check(def.whisperModel == "whisper-base", "default whisper model is base")
 
     // Round-trip through the in-memory store (no real file touched).
@@ -722,7 +733,14 @@ do {
     let old = try JSONDecoder().decode(AppSettings.self, from: oldJSON)
     check(old.captureMic && old.captureSystem, "old file: explicit keys decoded")
     check(old.transcriptionBackend == .local, "old file: new keys fall back to defaults")
-    check(old.summaryBackend == .openai, "old file: summary backend defaults")
+    check(old.summaryBackend == .local, "old file: missing summary backend uses local default")
+    check(old.language == "en", "old file: missing language uses English default")
+    check(old.storageDirectory == nil, "old file: missing storage preserves legacy location")
+    let existingJSON = #"{"transcriptionBackend":"deepgram","summaryBackend":"openai","language":""}"#.data(using: .utf8)!
+    let existing = try JSONDecoder().decode(AppSettings.self, from: existingJSON)
+    check(existing.transcriptionBackend == .deepgram && existing.summaryBackend == .openai && existing.language.isEmpty,
+          "saved cloud backends and automatic language remain unchanged")
+    check(existing.summaryModel == "gpt-4o-mini", "missing model matches the saved cloud backend")
 } catch {
     check(false, "settings: \(error)")
 }
@@ -749,10 +767,10 @@ do {
     check(store.load().summaryBackend == .local, "in-memory store persists the local backend")
 
     // A settings file written by an older version (no summaryBackend key) still
-    // loads with the openai default — adding the new case must not break that.
+    // loads with the local default.
     let oldJSON = #"{"captureMic":true}"#.data(using: .utf8)!
     let old = try JSONDecoder().decode(AppSettings.self, from: oldJSON)
-    check(old.summaryBackend == .openai, "old file still defaults to openai (lenient)")
+    check(old.summaryBackend == .local, "old file defaults to local (lenient)")
 } catch {
     check(false, "local summary backend: \(error)")
 }
@@ -1335,6 +1353,66 @@ do {
 }
 
 // MARK: - Orphan recording-directory sweep (Phase 7.1)
+section("recording folders: sortable start dates and compatible cleanup")
+do {
+    let root = suiteRoot.appendingPathComponent("dated-folders", isDirectory: true)
+    let previousRoot = RecordingsDirectory.baseDirectory
+    RecordingsDirectory.baseDirectory = { root }
+    defer {
+        RecordingsDirectory.baseDirectory = previousRoot
+        try? FileManager.default.removeItem(at: root)
+    }
+    let utc = TimeZone(secondsFromGMT: 0)!
+    let start = ISO8601DateFormatter().date(from: "2026-10-23T09:05:00Z")!
+    let meeting = Meeting(title: "Dated", startedAt: start, createdAt: start, lastActivityAt: start)
+    let dated = RecordingsDirectory.forMeeting(meeting, timeZone: utc)
+    check(dated.lastPathComponent == "20261023-0905-\(meeting.id.uuidString)", "folder uses the meeting start date and a unique ID")
+    let sameMinute = Meeting(title: "Another", startedAt: start, createdAt: start, lastActivityAt: start)
+    check(RecordingsDirectory.forMeeting(sameMinute, timeZone: utc) != dated, "meetings in the same minute have distinct folders")
+    let next = Meeting(title: "Later", startedAt: start.addingTimeInterval(60), createdAt: start, lastActivityAt: start)
+    check(dated.lastPathComponent < RecordingsDirectory.forMeeting(next, timeZone: utc).lastPathComponent,
+          "folder names sort chronologically")
+    let offset = RecordingsDirectory.forMeeting(meeting, timeZone: TimeZone(secondsFromGMT: 3600)!)
+    check(offset.lastPathComponent.hasPrefix("20261023-1005-"), "folder time uses the selected local timezone")
+    let yearEnd = ISO8601DateFormatter().date(from: "2021-01-01T00:05:00Z")!
+    let newYear = Meeting(title: "New Year", startedAt: yearEnd, createdAt: yearEnd, lastActivityAt: yearEnd)
+    check(RecordingsDirectory.forMeeting(newYear, timeZone: utc).lastPathComponent.hasPrefix("20210101-0005-"),
+          "folder year is the calendar year, including near New Year")
+
+    try FileManager.default.createDirectory(at: dated, withIntermediateDirectories: true)
+    let audio = dated.appendingPathComponent("mic.wav")
+    try Data("retryable audio".utf8).write(to: audio)
+    let empty = RecordingsDirectory.forMeeting(sameMinute, timeZone: utc)
+    try FileManager.default.createDirectory(at: empty, withIntermediateDirectories: true)
+    let orphan = RecordingsDirectory.forMeeting(next, timeZone: utc)
+    try FileManager.default.createDirectory(at: orphan, withIntermediateDirectories: true)
+    try Data("orphan audio".utf8).write(to: orphan.appendingPathComponent("mic.wav"))
+    let foreign = root.appendingPathComponent("notes-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: foreign, withIntermediateDirectories: true)
+    let invalid = root.appendingPathComponent("20261023-0905-not-a-meeting")
+    try FileManager.default.createDirectory(at: invalid, withIntermediateDirectories: true)
+    let artifacts = MeetingArtifacts()
+    let swept = Set(artifacts.sweep(liveIDs: [meeting.id, sameMinute.id]).map(\.lastPathComponent))
+    check(swept == Set([empty.lastPathComponent, orphan.lastPathComponent]), "sweep removes dated orphans and empty folders while preserving live audio and foreign folders")
+    try artifacts.removeEmptyDirectory(for: meeting.id)
+    check(FileManager.default.fileExists(atPath: audio.path), "empty-folder cleanup keeps retained dated audio")
+    try artifacts.remove([audio])
+    try artifacts.removeEmptyDirectory(for: meeting.id)
+    check(!FileManager.default.fileExists(atPath: dated.path), "cleanup finds dated folders by ID without recomputing the timezone")
+
+    // Discard handles both naming generations, including non-empty folders.
+    let legacy = root.appendingPathComponent(meeting.id.uuidString, isDirectory: true)
+    for dir in [legacy, offset] {
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try Data("audio".utf8).write(to: dir.appendingPathComponent("mic.wav"))
+    }
+    try artifacts.discard(meeting)
+    check(!FileManager.default.fileExists(atPath: legacy.path) && !FileManager.default.fileExists(atPath: offset.path),
+          "discard removes legacy and dated folders for the meeting")
+    check(FileManager.default.fileExists(atPath: foreign.path) && FileManager.default.fileExists(atPath: invalid.path),
+          "discard preserves unrecognized folder names")
+} catch { check(false, "dated recording folders: \(error)") }
+
 section("orphan sweep: pure decision + VM cleanup")
 do {
     // --- 1. Pure decision: which dirs are orphans ---
@@ -1411,7 +1489,7 @@ do {
     await pvm.stopAsync()
     let pMeeting = pvm.meetings.first(where: { $0.id == pm.id })
     check(pMeeting?.status == .summarized, "dir-cleanup: summarized")
-    let pdir = RecordingsDirectory.forMeeting(pm.id)
+    let pdir = RecordingsDirectory.forMeeting(pm)
     check(!FileManager.default.fileExists(atPath: pdir.path),
           "dir-cleanup: empty per-meeting dir removed after retention (no leak)")
 
@@ -1434,7 +1512,9 @@ do {
     )
     let km = await kvm.startAsync(title: "Keep audio dir")
     await kvm.stopAsync()
-    let kdir = RecordingsDirectory.forMeeting(km.id)
+    let kdir = RecordingsDirectory.forMeeting(km)
+    check(kvm.meeting(id: km.id)?.audioFileURLs[.mic]?.deletingLastPathComponent().path == kdir.path,
+          "recording writes audio into the folder based on meeting start time")
     check(FileManager.default.fileExists(atPath: kdir.path),
           "keepAudio: per-meeting dir retained because audio is kept")
 } catch {
@@ -1579,13 +1659,17 @@ do {
 // MARK: - Storage directory (pure resolve)
 section("storage: StorageDirectory resolves the data root")
 
-// Default (nil storageDirectory) → ends in Application Support/Transcriber.
+// New settings → Documents/Transcriber. Resolve only; never write there.
 let sdDefault = AppSettings()
 let sdDefaultBase = StorageDirectory.base(settings: sdDefault)
 check(
-    sdDefaultBase.path.hasSuffix("/Transcriber"),
-    "default: base ends in …/Transcriber (got \(sdDefaultBase.path))"
+    sdDefaultBase == FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        .appendingPathComponent("Transcriber", isDirectory: true),
+    "default: base is Documents/Transcriber"
 )
+let sdLegacy = AppSettings(storageDirectory: nil)
+check(StorageDirectory.base(settings: sdLegacy) == FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+    .appendingPathComponent("Transcriber", isDirectory: true), "legacy: nil storage keeps Application Support history accessible")
 check(
     StorageDirectory.meetingsURL(settings: sdDefault).lastPathComponent == "meetings.json",
     "default: meetingsURL is <base>/meetings.json"
@@ -1619,7 +1703,7 @@ check(
         == sdCustomDir.appendingPathComponent("recordings").path,
     "custom: recordings is inside the user's directory"
 )
-// Custom base is *not* the Application Support default.
+// Custom base differs from the Documents default.
 check(
     StorageDirectory.base(settings: sdCustom) != StorageDirectory.base(settings: sdDefault),
     "custom: base differs from the default"
