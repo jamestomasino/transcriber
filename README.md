@@ -1,166 +1,224 @@
 # Transcriber
 
-A native macOS app that records a meeting (your microphone and the system audio
-from Zoom / Slack / Teams), transcribes it with speaker identification, generates
-a structured summary, and then **deletes the audio and the raw transcript,
-keeping only the summary.**
+A native macOS app that records a meeting — your **microphone and the system
+audio** from Zoom, Slack, or Teams — turns it into a **transcript with
+identified speakers**, writes a **structured summary**, and then **deletes the
+audio and the transcript, keeping only the summary.**
 
-> **Status:** The build, test harness, pure core model + engine, the mic +
-> system-audio capture
-> path, the **transcribe → diarize → summarize → retention** pipeline,
-> **durable persistence**, a **settings window**, a **menu-bar item**, a
-> **meeting detail pane**, **completion / failure notifications**, and
-> **long-meeting hardening** (generous HTTP timeouts + retry of transient
-> failures, and a transcript cap that keeps very long recordings' LLM prompts
-> bounded, with a user-facing warning when the summary is a partial view) are all
-> green (285 tests, including
-> integration tests that drive the real pipeline → real store → the copyable
-> text the detail pane shows, across the default-retention, retry, and
-> transcript-kept paths, plus a startup orphan sweep so per-meeting recording
-> directories never leak into Application Support).
-> Transcription is pluggable — **local Apple Speech** (private, on-device, no
-> key) by default, or **Deepgram** for accurate speaker ID — and summarization
-> runs **on-device (Apple Intelligence — fully offline, no key)**, on **OpenAI**,
-> or **Anthropic**, so the whole app can run locally. A live level meter and a
-> permission / capture status card are wired into the UI. Meeting summaries
-> **survive a relaunch**
-> (`MeetingStore` → `meetings.json`), which is the product's core promise: the
-> summary is the only durable artifact. Backends, models, retention, and API
-> keys are now **user-configurable in the Settings window** (⌘,) — and because
-> the pipeline is rebuilt from the *current* settings at run time, switching
-> backend or model takes effect on the next meeting without a relaunch. The
-> **data location** (where meetings + recordings live) is also user-configurable
-> via a "Data location" picker, defaulting to Application Support. Select
-> a meeting to read its **full structured summary** (overall, key points,
-> decisions, action items), the **retained transcript** (when you opted to
-> keep it), and to **retry** a failed meeting, **copy** the summary/transcript,
-> or **delete** it. See [PLAN.md](PLAN.md).
+The summary is the only thing that sticks around. That's the point.
 
-## Features
+```
+  ┌─────────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────────────┐
+  │  Record     │ → │  Transcribe  │ → │  Summarize   │ → │  Keep summary,   │
+  │ mic + system│   │ + speakers   │   │ structured   │   │  delete the rest │
+  └─────────────┘   └──────────────┘   └──────────────┘   └──────────────────┘
+        Start ▸ meeting ▸ Stop ▸ (runs automatically) ▸ "Summary ready"
+```
 
-- Start / stop meeting recording, with an optional meeting name.
-- Capture the microphone and the system audio simultaneously.
-- Transcribe with speaker identification (diarization).
-- Generate a structured summary: overall, key points, decisions, action items.
-- Save only the summary; delete the audio and transcript by default
-  (`RetentionPolicy`; opt-in "keep transcript / keep audio" flags on `AppSettings`).
-  Once the raw audio is gone, the per-meeting recording directory is removed too,
-  and a **startup orphan sweep** clears any that outlived their meeting — so no
-  empty directories leak into `~/Library/Application Support`.
-- The summary is **durable**: meetings persist to `meetings.json` across
-  relaunches (`MeetingStore`). A meeting that was mid-flight (recording or
-  processing) when the app quit is reconciled to a retryable `.failed` state on
-  next launch.
-- Pluggable transcription + summarization backends (see Backends below).
-- A **Settings window** (Transcriber ▸ Settings, ⌘,) to configure capture
-  sources, retention, the transcription/summary backends, models, and language,
-  and to enter/clear API keys. Every change is persisted to `settings.json`
-  immediately (API keys go to the Keychain, never to disk in plain text).
-- **Live backend switching**: the pipeline is rebuilt from the *current*
-  settings at run time, so changing backend or model in Settings takes effect
-  on the next meeting without a relaunch.
-- A **menu-bar item** with a live Start / Stop, so a meeting can be started or
-  stopped without the main window focused.
-- **Completion / failure notifications**: when a meeting finishes (or fails)
-  while you're in the menu bar, a macOS banner announces it — "Summary ready:
-  {overall}" on success, or the failure reason with a nudge to retry on error.
-  The decision is pure Core (`MeetingNotificationPolicy`) and tested; the App
-  layer posts it via `UserNotifications` (authorization requested once at
-  launch). Toggle it off in Settings → **Notify when a summary is ready**.
-- **Long-meeting hardening**: the cloud HTTP client uses a generous per-request
-  timeout (300s, not `URLSession.shared`'s 60s) so a long recording's upload or
-  a long transcript's trip to the LLM isn't cut off mid-flight, and it retries
-  transient failures (rate limits, 5xx, network timeouts) up to a cap while
-  never retrying 4xx client errors. The retry decision is pure Core
-  (`HTTPRetryPolicy`) and tested with a scripted fake; the App wires the real
-  client + retry into the pipeline by default. Very long recordings are also
-  capped: both LLM summarizers fit the transcript into a generous budget
-  (`Summary.fitTranscript`, 120k chars) that keeps the opening and closing and
-  marks the omission, so the prompt stays inside the model's context window and
-  cost budget instead of failing the summary. Because that cap is a *partial
-  view*, the user is told: `MeetingSummary.transcriptWasCapped` (lenient-decoded
-  so old summaries still load) is set when the transcript didn't fit and
-  surfaced in the detail pane (an orange warning banner) and in the copied text
-  (a "partial view" note).
-- A **meeting detail pane**: select any meeting to read its full structured
-  summary (overall, key points, decisions, action items) and the retained
-  transcript (when you opted to keep it). A failed meeting shows its error and
-  a **Retry** button (it re-runs with the current backend + key); you can also
-  **copy** the summary or transcript to the clipboard, or **delete** the
-  meeting. The copyable text is produced by pure Core helpers
-  (`summaryText()` / `transcriptText()`), so the on-screen view and the
-  clipboard share one deterministic source.
+---
 
-## Backends
+## What you get
 
-Transcription and summarization are **pluggable**, selected via `AppSettings`
-and configurable in the **Settings window** (⌘,). Defaults are local
-transcription (Apple Speech) + OpenAI summary:
+- **One-tap meetings.** Start and stop a recording (optionally with a name) from
+  the main window or the **menu bar** — no need to focus the app.
+- **Both sides of the call.** Microphone *and* system audio, captured as
+  separate tracks so you hear what you said and what the other side said.
+- **Speaker labels.** The transcript separates who said what (Speaker 1,
+  Speaker 2, …).
+- **A structured summary.** Overall, key points, decisions, and action items —
+  not a wall of text.
+- **Private by default.** The default path runs **entirely on your Mac**:
+  on-device transcription (Apple Speech) + on-device summarization (Apple
+  Intelligence). No account, no API key, no network.
+- **Cloud when you want it.** Swap in Deepgram (best speaker ID) or
+  OpenAI / Anthropic (stronger summaries) with a key — or mix and match per
+  stage.
+- **It remembers the summary.** Meetings survive a relaunch. A meeting that was
+  mid-flight when you quit the app comes back as **retryable**, not lost.
+- **A notification when it's done.** A macOS banner — "Summary ready: …" on
+  success, the failure reason on error — so a meeting started from the menu bar
+  doesn't finish silently.
 
-| Stage        | Backend            | Notes                                                        |
-| ------------ | ------------------ | ------------------------------------------------------------ |
-| Transcribe   | **Apple Speech**   | On-device, private, no API key, no network. Default.         |
-| Transcribe   | **Deepgram**       | Nova-2 with diarization; accurate speaker ID. Needs a key.   |
-| Summarize    | **Local**          | On-device Apple Intelligence. Offline, no key, no network.   |
-| Summarize    | **OpenAI**         | Any chat model. Needs a key.                                 |
-| Summarize    | **Anthropic**      | Any Claude model. Needs a key.                               |
-
-**Fully local:** pair the **Apple Speech** transcriber with the **Local**
-summarizer and the entire app runs on your own machine — no account, no API
-key, no network. The local summarizer uses Apple's on-device
-`SystemLanguageModel` (Apple Intelligence, `FoundationModels`), gated to
-macOS 26+; on older systems the app still builds and runs, and the option
-degrades to a clear "use OpenAI/Anthropic" message. The local summarizer
-reuses the same `Summary.prompt`/`Summary.parse` contract as the cloud
-backends, so the detail pane, copy, and retention paths are identical.
-
-API keys are stored in the macOS Keychain (never in settings or on disk in
-plain text). The download-on-demand model store (`ModelStore` + a Whisper
-catalog) is in place for backends that need a local model; the current local
-path uses Apple's on-device Speech and downloads nothing.
+---
 
 ## Requirements
 
-- macOS 14+ (Apple Silicon or Intel), built with the **Command Line Tools only**
-  (no full Xcode required).
-- Microphone access (granted on first recording) and, for the local path,
-  Speech Recognition (System Settings → Privacy & Security).
-- A summarization backend: an OpenAI or Anthropic API key (stored in the
-  Keychain via `Keychain.set`). A Deepgram key is optional, only for the
-  cloud transcription backend.
-- No network or account is required for the default path (local Speech +
-  a backend key for summarization). Meeting summaries persist to
-  `~/Library/Application Support/Transcriber/meetings.json` (with a
-  `meetings.json.bak` backup of the prior generation, plus a corrupt-file
-  fallback, so the summary — the only durable artifact — is recoverable).
+- **macOS 14 or later** (Apple Silicon or Intel).
+- **Microphone access** — macOS asks on your first recording.
+- **Screen Recording access** — needed to capture *system* audio
+  (System Settings → Privacy & Security → Screen Recording). Not needed if you
+  only want your own microphone.
+- **Speech Recognition** (for on-device transcription) —
+  System Settings → Privacy & Security → Speech Recognition.
+- **A summarization backend** — one of:
+  - **Local** (on-device Apple Intelligence): nothing else required, **but**
+    needs **macOS 26+** with Apple Intelligence enabled, or
+  - **OpenAI** or **Anthropic**: an API key (stored in your macOS Keychain).
 
-## Build & run
+> **The one decision that matters most:** the app ships with a **local
+> transcriber** (no key needed) but an **OpenAI summarizer** (needs a key) as
+> the default. So out of the box you'll either add an OpenAI key, or switch the
+> summary backend to **Local** for a fully offline setup. See [Backends](#backends)
+> and [Getting started](#getting-started).
+
+---
+
+## Getting started
+
+Build and run from the terminal (the build needs the Command Line Tools only —
+no full Xcode required):
 
 ```bash
-bash build.sh          # build build/Transcriber.app
-bash build.sh test     # build the app + run the test suite
+bash build.sh              # → build/Transcriber.app
 open build/Transcriber.app
 ```
 
-The build uses `swiftc` only. If your Command Line Tools SDK can't compile
-SwiftUI's `@State`/`@Observable` macros, `build.sh` automatically falls back to
-an older installed SDK — this is expected and not a failure.
+Then, in the app:
 
-## Project layout
+1. **Pick a summary backend** in Settings (⌘,):
+   - **Local** — fully offline. Choose this if you're on macOS 26+ and don't
+     want to sign up for anything. No key, no network.
+   - **OpenAI** or **Anthropic** — enter your API key under *Summary*. It's
+     saved to the macOS Keychain, never written to a file.
+2. **Start a meeting.** Give it a name (optional) and hit **Start**. A level
+   meter and a permission/capture status card show what's being recorded.
+3. **Stop when you're done.** Transcription and summarization run automatically
+   in the background.
+4. **Read the summary.** A notification tells you it's ready; select the meeting
+   to open its **detail pane** with the full structured summary, and **Retry**,
+   **Copy**, or **Delete** it.
+
+That's the whole loop. Everything else is optional tuning.
+
+---
+
+## Backends
+
+Transcription and summarization are **independent** — pick any combination.
+
+| Stage        | Option        | Runs where      | Needs a key? | Notes                                   |
+| ------------ | ------------- | --------------- | ------------ | --------------------------------------- |
+| **Transcribe** | **Local**   | On your Mac     | No           | Apple Speech. Private, offline. Default. |
+| **Transcribe** | **Deepgram**| Cloud          | Yes (Deepgram) | Nova with native diarization — the most accurate speaker IDs. |
+| **Summarize**  | **Local**   | On your Mac     | No           | Apple Intelligence. Offline. **macOS 26+.** |
+| **Summarize**  | **OpenAI**  | Cloud           | Yes (OpenAI) | Any chat model (default: `gpt-4o-mini`). |
+| **Summarize**  | **Anthropic** | Cloud          | Yes (Anthropic) | Any Claude model.                        |
+
+**Fully local (recommended for privacy):** Local transcriber + Local summarizer
+= the entire app runs on your machine. No account, no key, no network. On
+macOS 26+ this is the best default; on older systems the Local summarizer is
+unavailable, so use OpenAI or Anthropic for the summary.
+
+**Best quality:** Deepgram transcriber + your preferred LLM for the summary.
+
+API keys are stored in the **macOS Keychain** (via `Keychain.set`), never in
+`settings.json` or any plain-text file, and the UI shows a "stored" indicator
+rather than echoing the secret back.
+
+---
+
+## Privacy & where your data lives
+
+- **The summary is the only durable artifact.** By default, right after the
+  summary is written, Transcriber **deletes the audio and the transcript** and
+  removes the per-meeting recording folder. A startup sweep clears any recording
+  directory that outlived its meeting, so nothing leaks into your Application
+  Support folder.
+- **Opt in to keep more** if you want to: Settings → *Storage* → "Keep
+  transcript after summary" / "Keep audio after summary."
+- **Your summaries persist** to `meetings.json` (with a one-generation backup
+  and a corrupt-file fallback), so they survive a relaunch.
+- **Choose where data goes** in Settings → *Storage* → **Data location**. The
+  default is `~/Library/Application Support/Transcriber`; pick any folder you
+  like, or **Reset** to go back to the default.
+- **Cloud backends send audio / transcript to that provider** (Deepgram, OpenAI,
+  or Anthropic) to do their job. Local backends send nothing anywhere.
+
+---
+
+## Settings (⌘,)
+
+Everything is configurable and saved immediately. Changing a backend or model
+takes effect on the **next meeting** — no relaunch needed.
+
+| Section        | What you can set                                                        |
+| -------------- | ----------------------------------------------------------------------- |
+| **Audio**      | Capture microphone / capture system audio (independently).             |
+| **Storage**    | Keep transcript / keep audio after summary; **Data location** picker.  |
+| **Transcription** | Backend (Local / Deepgram), language code, and the Deepgram key.     |
+| **Summary**    | Backend (Local / OpenAI / Anthropic), model, and the provider key.     |
+| **General**    | Show toasts; notify when a summary is ready.                           |
+
+---
+
+## Troubleshooting
+
+**"I stopped the meeting but there's no summary."**
+You likely have the OpenAI/Anthropic summarizer selected without a key. Add the
+key in Settings, or switch the summary backend to **Local** (macOS 26+) and
+retry the meeting from its detail pane.
+
+**"It captured my voice but not the other side."**
+System audio needs **Screen Recording** permission. Grant it in System Settings
+→ Privacy & Security → Screen Recording, then start a new meeting.
+
+**"The Local summary option is greyed out / errors with 'use OpenAI or Anthropic'."**
+The on-device summarizer requires **macOS 26+ with Apple Intelligence enabled**.
+On older systems, use OpenAI or Anthropic for the summary (transcription can
+still be fully local).
+
+**"A meeting shows as failed."**
+Open it and hit **Retry** — it re-runs with your current backend and key.
+Transient network and rate-limit failures are retried automatically; a persistent
+one (e.g. a bad key) will surface the reason so you can fix it.
+
+**"My summary says it's a partial view."**
+The meeting was very long, so the transcript was capped to fit the model's
+context window (keeping the opening and closing). The full record is still
+available if you enabled "Keep transcript."
+
+---
+
+## Development
+
+```bash
+bash build.sh          # build the app
+bash build.sh test     # build + run the full test suite
+```
+
+The build uses `swiftc` only (no Xcode, no SwiftPM at build time). If your
+Command Line Tools SDK can't compile SwiftUI's `@State` / `@Observable` macros,
+`build.sh` automatically falls back to an older installed SDK — that's expected,
+not a failure.
+
+**Layout**
 
 ```
-Sources/Core/   Pure, AppKit-free core (Foundation only): model, engine, view
-                model, pipeline (transcribe → diarize → summarize), settings,
-                retention, persistence (MeetingStore → meetings.json), model
-                store, summary parser, and the pluggable LLM / Deepgram
-                backends. Fully unit-testable.
-Sources/App/    SwiftUI/AppKit shell (window + menu bar + meeting detail pane),
-                plus the platform pieces that Core stays pure of: real audio
-                capture (AVFoundation), local Speech transcription, the
-                URLSession HTTP + model downloaders, Keychain-backed API keys,
-                completion/failure notifications (UserNotifications), and the
-                processor factory.
-Tests/          Custom assertion-based test harness (no XCTest)
-build.sh        swiftc-only build (app + tests), with SDK fallback
-PLAN.md         Full design, architecture, roadmap, and open decisions
+Sources/Core/   Pure, AppKit-free core (Foundation only): the model, engine,
+                view model, the transcribe → diarize → summarize pipeline,
+                settings, retention, persistence, the summary parser, and the
+                pluggable backends. Fully unit-testable.
+Sources/App/    The SwiftUI/AppKit shell (window, menu bar, detail pane,
+                settings) plus the platform pieces Core stays pure of: real
+                audio capture (ScreenCaptureKit), on-device Speech,
+                on-device summarization (FoundationModels), URLSession + retry,
+                Keychain-backed keys, and notifications.
+Tests/          Custom assertion-based test harness (no XCTest).
+build.sh        swiftc-only build (app + tests), with SDK fallback.
+PLAN.md         Full design, architecture, roadmap, and open decisions.
+docs/           Distribution runbook (signing, notarization, CI).
 ```
+
+**Design principle:** the tricky logic (retention, retry, summarization
+decisions, notification policy) lives in Core as pure, deterministic functions
+that return *decisions*; the App layer performs the I/O. That keeps the product
+promises testable without a Mac, a network, or a key.
+
+---
+
+## More
+
+- [PLAN.md](PLAN.md) — architecture, phased roadmap, and the product decisions
+  behind each choice.
+- [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md) — how to sign, notarize, and
+  ship the app to other Macs (Developer ID, GitHub Actions).
