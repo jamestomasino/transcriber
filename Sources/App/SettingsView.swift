@@ -64,10 +64,17 @@ struct SettingsView: View {
 
             Section("Summary") {
                 Picker("Backend", selection: binding(\.summaryBackend)) {
+                    Text("Local — on-device Apple Intelligence (offline, no key)").tag(SummaryBackend.local)
                     Text("OpenAI").tag(SummaryBackend.openai)
                     Text("Anthropic").tag(SummaryBackend.anthropic)
                 }
-                TextField("Model (e.g. gpt-4o-mini / claude-3-5-sonnet)", text: binding(\.summaryModel))
+                if vm.settings.summaryBackend == .local {
+                    Text("Runs on this Mac with Apple Intelligence — no account, no key, no network. Requires macOS 26+ with Apple Intelligence enabled.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    TextField("Model (e.g. gpt-4o-mini / claude-3-5-sonnet)", text: binding(\.summaryModel))
+                }
                 if vm.settings.summaryBackend == .openai {
                     APIKeyRow(title: "OpenAI API key", keyID: "openai_api_key")
                 }

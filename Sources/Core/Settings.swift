@@ -24,6 +24,10 @@ public enum TranscriptionBackend: String, Codable, CaseIterable, Sendable {
 
 /// Where the summary comes from.
 public enum SummaryBackend: String, Codable, CaseIterable, Sendable {
+    /// On-device Apple Intelligence model — fully local, offline, no API key,
+    /// no model download. Requires macOS 26+ with Apple Intelligence enabled;
+    /// the app degrades gracefully (a clear error) on older systems.
+    case local
     case openai
     case anthropic
 }

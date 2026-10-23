@@ -8,10 +8,11 @@ only the **summary** — deleting the audio and the transcript.
 > **Implementation progress (as of the meeting detail pane, orphan sweep, notifications, and long-meeting hardening).**
 > Phases 0–5 plus the Settings window, menu bar, the meeting detail pane, the
 > startup orphan sweep, **notifications**, and **long-meeting hardening** are
-> built and green (278 tests, `bash build.sh test`):
+> built and green (285 tests, `bash build.sh test`):
 > the pure core model + engine, mic +
 > system audio capture, the **transcribe → diarize → summarize → retention**
-> pipeline (pluggable Apple Speech / Deepgram + OpenAI / Anthropic), **durable
+> pipeline (pluggable Apple Speech / Deepgram + **local (on-device Apple
+> Intelligence)** / OpenAI / Anthropic), **durable
 > persistence** via `MeetingStore` → `meetings.json`, and a **Settings window**
 > (⌘,) for backends, models, retention, language, and API keys (Keychain).
 > The summary survives a relaunch (the product's core promise), and a meeting
@@ -37,7 +38,21 @@ only the **summary** — deleting the audio and the transcript.
 > failure, and nothing at all when the toggle is off) feeds a `notifier` seam
 > on the view model, and the App layer posts it via `UserNotifications`
 > (requesting authorization once at launch). The decision is pure Core and
-> tested; the App owns the platform framework. **Long-meeting hardening** is
+> tested; the App owns the platform framework. **Local (on-device) summary** is
+> done: a `SummaryBackend.local` case routes to an App-layer `LocalSummarizer`
+> built on Apple's on-device `SystemLanguageModel` (`FoundationModels`,
+> Apple Intelligence) via `LanguageModelSession.streamResponse(to:).collect()`
+> — fully offline, no key, no download — and it reuses the shared
+> `Summary.prompt` / `Summary.parse`, so it emits the same JSON contract as the
+> cloud backends and the detail pane / copy / retention paths are unchanged.
+> The framework is gated to macOS 26.0+, so the call is wrapped in a
+> `#available` guard and the summarizer degrades to a clear "use OpenAI /
+> Anthropic" error on older systems (the app still builds and runs on macOS
+> 14+; the option is simply unavailable there). This makes the whole app
+> runnable locally: local transcription + local summary, zero cloud. Verified
+> with a live run — the real on-device model summarized a real transcript into
+> a correct structured summary (overall, key points, decision, action item),
+> offline. **Long-meeting hardening** is
 > done: the real HTTP client (`URLSessionHTTPClient`) now uses a dedicated
 > `URLSession` with a generous request timeout (`HTTPRetryPolicy.
 > defaultRequestTimeout`, 300s) instead of `URLSession.shared`'s 60s cap, so a

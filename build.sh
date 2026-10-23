@@ -40,6 +40,7 @@ APP_SRC=(
   Sources/App/RealAudioCapture.swift
   Sources/App/HTTPClient.swift
   Sources/App/LocalTranscriber.swift
+  Sources/App/LocalSummarizer.swift
   Sources/App/ProcessorFactory.swift
   Sources/App/Notifications.swift
 )

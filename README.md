@@ -13,16 +13,17 @@ keeping only the summary.**
 > **long-meeting hardening** (generous HTTP timeouts + retry of transient
 > failures, and a transcript cap that keeps very long recordings' LLM prompts
 > bounded, with a user-facing warning when the summary is a partial view) are all
-> green (278 tests, including
+> green (285 tests, including
 > integration tests that drive the real pipeline → real store → the copyable
 > text the detail pane shows, across the default-retention, retry, and
 > transcript-kept paths, plus a startup orphan sweep so per-meeting recording
 > directories never leak into Application Support).
 > Transcription is pluggable — **local Apple Speech** (private, on-device, no
 > key) by default, or **Deepgram** for accurate speaker ID — and summarization
-> runs on **OpenAI** or **Anthropic**. A download-on-demand model store is in
-> place for local-model backends. A live level meter and a permission / capture
-> status card are wired into the UI. Meeting summaries **survive a relaunch**
+> runs **on-device (Apple Intelligence — fully offline, no key)**, on **OpenAI**,
+> or **Anthropic**, so the whole app can run locally. A live level meter and a
+> permission / capture status card are wired into the UI. Meeting summaries
+> **survive a relaunch**
 > (`MeetingStore` → `meetings.json`), which is the product's core promise: the
 > summary is the only durable artifact. Backends, models, retention, and API
 > keys are now **user-configurable in the Settings window** (⌘,) — and because
@@ -93,14 +94,25 @@ keeping only the summary.**
 ## Backends
 
 Transcription and summarization are **pluggable**, selected via `AppSettings`
-and configurable in the **Settings window** (⌘,). Defaults are local + OpenAI:
+and configurable in the **Settings window** (⌘,). Defaults are local
+transcription (Apple Speech) + OpenAI summary:
 
 | Stage        | Backend            | Notes                                                        |
 | ------------ | ------------------ | ------------------------------------------------------------ |
 | Transcribe   | **Apple Speech**   | On-device, private, no API key, no network. Default.         |
 | Transcribe   | **Deepgram**       | Nova-2 with diarization; accurate speaker ID. Needs a key.   |
+| Summarize    | **Local**          | On-device Apple Intelligence. Offline, no key, no network.   |
 | Summarize    | **OpenAI**         | Any chat model. Needs a key.                                 |
 | Summarize    | **Anthropic**      | Any Claude model. Needs a key.                               |
+
+**Fully local:** pair the **Apple Speech** transcriber with the **Local**
+summarizer and the entire app runs on your own machine — no account, no API
+key, no network. The local summarizer uses Apple's on-device
+`SystemLanguageModel` (Apple Intelligence, `FoundationModels`), gated to
+macOS 26+; on older systems the app still builds and runs, and the option
+degrades to a clear "use OpenAI/Anthropic" message. The local summarizer
+reuses the same `Summary.prompt`/`Summary.parse` contract as the cloud
+backends, so the detail pane, copy, and retention paths are identical.
 
 API keys are stored in the macOS Keychain (never in settings or on disk in
 plain text). The download-on-demand model store (`ModelStore` + a Whisper

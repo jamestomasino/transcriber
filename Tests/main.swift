@@ -721,6 +721,36 @@ do {
     check(false, "settings: \(error)")
 }
 
+// MARK: - Phase 7: local (on-device) summary backend
+section("settings: local summary backend is a distinct, round-trippable case")
+do {
+    // `.local` is a distinct case from the two cloud backends.
+    check(SummaryBackend.local != .openai, "local is not openai")
+    check(SummaryBackend.local != .anthropic, "local is not anthropic")
+    check(SummaryBackend.allCases.contains(.local), "allCases includes local")
+
+    // It encodes to a stable string and round-trips through JSON.
+    let localData = try JSONEncoder().encode(SummaryBackend.local)
+    check(String(data: localData, encoding: .utf8) == #""local""#, "encodes to the string 'local'")
+    let decoded = try JSONDecoder().decode(SummaryBackend.self, from: localData)
+    check(decoded == .local, "round-trips back to .local")
+
+    // An AppSettings with the local backend persists through the in-memory store.
+    let store = SettingsStore.inMemory()
+    var s = store.load()
+    s.summaryBackend = .local
+    store.save(s)
+    check(store.load().summaryBackend == .local, "in-memory store persists the local backend")
+
+    // A settings file written by an older version (no summaryBackend key) still
+    // loads with the openai default — adding the new case must not break that.
+    let oldJSON = #"{"captureMic":true}"#.data(using: .utf8)!
+    let old = try JSONDecoder().decode(AppSettings.self, from: oldJSON)
+    check(old.summaryBackend == .openai, "old file still defaults to openai (lenient)")
+} catch {
+    check(false, "local summary backend: \(error)")
+}
+
 // MARK: - Phase 4: LLM summarizer over a fake HTTP client
 section("llm: summarizer uses HTTP seam + shared parser")
 final class FakeHTTP: HTTPClient {

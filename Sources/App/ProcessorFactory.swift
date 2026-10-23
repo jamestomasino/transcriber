@@ -31,8 +31,9 @@ public struct URLSessionModelDownloader: ModelDownloader {
 //   .local     → Apple Speech (on-device, private, no key) + heuristic diarizer
 //   .deepgram  → Deepgram Nova (accurate speaker ID, needs a key) + identity diarizer
 //
-// The summarizer is always an LLM (OpenAI or Anthropic per settings), so the
-// summary quality is the same regardless of the transcription backend.
+// The summarizer is an LLM chosen per settings: **local** (on-device Apple
+// Intelligence — offline, no key), **OpenAI**, or **Anthropic**, so a user can
+// run the whole pipeline locally or in the cloud.
 //
 // API keys are read lazily from the Keychain through the injected closures, so
 // the Core components stay pure and unit-testable.
@@ -66,6 +67,10 @@ public enum ProcessorFactory {
     public static func makeSummarizer(settings: AppSettings, http: (any HTTPClient)? = nil) -> any Summarizer {
         let http = http ?? RetryingHTTPClient(inner: URLSessionHTTPClient())
         switch settings.summaryBackend {
+        case .local:
+            // On-device Apple Intelligence — no key, no network. The `http`
+            // client is unused here; the model runs locally.
+            return LocalSummarizer()
         case .openai:
             return OpenAISummarizer(model: settings.summaryModel, apiKey: { Keychain.get("openai_api_key") }, http: http)
         case .anthropic:
