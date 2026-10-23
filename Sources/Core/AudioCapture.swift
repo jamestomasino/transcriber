@@ -126,6 +126,43 @@ public protocol AudioCaptureSession: Sendable {
     func stop() async throws -> CapturedAudio
 }
 
+// MARK: - Storage directory (Core, pure)
+//
+// Resolves the base directory for Transcriber *data* (meetings.json +
+// recordings/) from the user's settings. Pure: it only reads the settings
+// value and applies the default — no I/O, no side effects.
+//
+// Design note: `settings.json` itself always lives in Application Support
+// (the app must be able to find it on launch without knowing the custom path
+// yet). The `storageDirectory` setting controls where the *data* — meetings
+// and recordings — is stored, which is what the DoD's "summary save location"
+// preference is about.
+//
+// `storageDirectory == nil` (the default) → ~/Library/Application Support/Transcriber/
+// `storageDirectory == /path/to/dir` → that directory is the Transcriber data root.
+
+public enum StorageDirectory {
+    /// The Transcriber data root for the given settings.
+    public static func base(settings: AppSettings) -> URL {
+        if let custom = settings.storageDirectory {
+            return custom
+        }
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        return appSupport.appendingPathComponent("Transcriber", isDirectory: true)
+    }
+
+    /// `meetings.json` inside the resolved data root.
+    public static func meetingsURL(settings: AppSettings) -> URL {
+        base(settings: settings).appendingPathComponent("meetings.json")
+    }
+
+    /// The recordings directory inside the resolved data root.
+    public static func recordingsURL(settings: AppSettings) -> URL {
+        base(settings: settings).appendingPathComponent("recordings", isDirectory: true)
+    }
+}
+
 /// Error types surfaced by capture, so the UI can show actionable messages
 /// instead of a generic failure.
 public enum AudioCaptureError: Error, Equatable, Sendable {

@@ -13,7 +13,7 @@ keeping only the summary.**
 > **long-meeting hardening** (generous HTTP timeouts + retry of transient
 > failures, and a transcript cap that keeps very long recordings' LLM prompts
 > bounded, with a user-facing warning when the summary is a partial view) are all
-> green (270 tests, including
+> green (278 tests, including
 > integration tests that drive the real pipeline → real store → the copyable
 > text the detail pane shows, across the default-retention, retry, and
 > transcript-kept paths, plus a startup orphan sweep so per-meeting recording
@@ -27,7 +27,9 @@ keeping only the summary.**
 > summary is the only durable artifact. Backends, models, retention, and API
 > keys are now **user-configurable in the Settings window** (⌘,) — and because
 > the pipeline is rebuilt from the *current* settings at run time, switching
-> backend or model takes effect on the next meeting without a relaunch. Select
+> backend or model takes effect on the next meeting without a relaunch. The
+> **data location** (where meetings + recordings live) is also user-configurable
+> via a "Data location" picker, defaulting to Application Support. Select
 > a meeting to read its **full structured summary** (overall, key points,
 > decisions, action items), the **retained transcript** (when you opted to
 > keep it), and to **retry** a failed meeting, **copy** the summary/transcript,

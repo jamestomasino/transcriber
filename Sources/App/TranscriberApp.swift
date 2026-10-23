@@ -12,7 +12,15 @@ struct TranscriberApp: App {
     init() {
         let settingsStore = SettingsStore(url: Self.settingsURL)
         let settings = settingsStore.load()
-        let meetingStore = MeetingStore(url: Self.meetingsURL)
+        // The data directory (meetings.json + recordings/) is resolved from
+        // settings: custom if the user set one, otherwise Application Support.
+        // settings.json itself always lives in Application Support so the app
+        // can find it on launch regardless of the data location.
+        let meetingStore = MeetingStore(url: StorageDirectory.meetingsURL(settings: settings))
+        // Point the recordings directory at the same resolved root. Capture the
+        // *store* (not the settings snapshot) so a directory change made in
+        // Settings is picked up on the next launch.
+        RecordingsDirectory.baseDirectory = { StorageDirectory.recordingsURL(settings: settingsStore.load()) }
         _vm = StateObject(wrappedValue: TranscriberViewModel(
             capture: AVAudioCapture(),
             processor: ProcessorFactory.make(settings: settings),

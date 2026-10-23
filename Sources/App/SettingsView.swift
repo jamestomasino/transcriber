@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 #if canImport(TranscriberCore)
 import TranscriberCore
@@ -42,6 +43,7 @@ struct SettingsView: View {
                 Text("By default the app deletes the audio and transcript right after the summary is written, keeping only the summary. Flip these to retain them.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                StorageDirectoryRow(vm: vm)
             } header: {
                 Text("Storage")
             }
@@ -81,6 +83,57 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .frame(minWidth: 440, minHeight: 520)
+    }
+}
+
+// MARK: - Storage directory row
+//
+// Lets the user pick a custom directory for Transcriber data (meetings.json
+// + recordings/). The default is Application Support. Uses NSOpenPanel
+// (AppKit) for the directory chooser — the only place in the app that needs
+// AppKit for a file dialog.
+private struct StorageDirectoryRow: View {
+    @ObservedObject var vm: TranscriberViewModel
+
+    var body: some View {
+        HStack {
+            Text("Data location")
+                .font(.subheadline)
+            Spacer()
+            Text(displayPath)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Button("Choose…") { chooseDirectory() }
+            if vm.settings.storageDirectory != nil {
+                Button("Reset", role: .destructive) {
+                    vm.updateSettings { $0.storageDirectory = nil }
+                }
+            }
+        }
+    }
+
+    private var displayPath: String {
+        if let dir = vm.settings.storageDirectory {
+            return dir.path
+        }
+        return "Default (Application Support)"
+    }
+
+    private func chooseDirectory() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Choose"
+        panel.message = "Choose where Transcriber stores its data (meetings + recordings)."
+        if let current = vm.settings.storageDirectory {
+            panel.directoryURL = current
+        }
+        if panel.runModal() == .OK, let url = panel.url {
+            vm.updateSettings { $0.storageDirectory = url }
+        }
     }
 }
 

@@ -8,7 +8,7 @@ only the **summary** — deleting the audio and the transcript.
 > **Implementation progress (as of the meeting detail pane, orphan sweep, notifications, and long-meeting hardening).**
 > Phases 0–5 plus the Settings window, menu bar, the meeting detail pane, the
 > startup orphan sweep, **notifications**, and **long-meeting hardening** are
-> built and green (270 tests, `bash build.sh test`):
+> built and green (278 tests, `bash build.sh test`):
 > the pure core model + engine, mic +
 > system audio capture, the **transcribe → diarize → summarize → retention**
 > pipeline (pluggable Apple Speech / Deepgram + OpenAI / Anthropic), **durable
@@ -536,15 +536,20 @@ artifacts to remove:
 ```
 <storage dir>/                     # default: ~/Library/Application Support/Transcriber/
   meetings.json                    # retained summaries + metadata (backup-rotating .bak)
-  settings.json                    # preferences
-  audio/<meetingID>.m4a           # transient recording(s) — deleted after summary
-  transcripts/<meetingID>.json    # transient transcript — deleted after summary
+  settings.json                    # preferences (always in Application Support, see below)
+  recordings/<meetingID>/         # transient audio (mic.caf / system.caf) — deleted after summary
 ```
 
 - `meetings.json` uses the **same backup-rotation + corrupt-fallback** logic as
   `EntryStore` (the summary is the user's irreplaceable data).
 - `settings.json` uses the lighter `SettingsStore` approach.
-- `audio/` and `transcripts/` are ephemeral; a startup sweep removes orphans
+- **Data location is user-configurable.** The `<storage dir>` (meetings +
+  recordings) is resolved by the pure Core `StorageDirectory` resolver from the
+  `storageDirectory` setting: the user's chosen directory if set, otherwise
+  Application Support. `settings.json` itself always lives in Application
+  Support so the app can find it on launch before it knows the custom path.
+  The Settings window exposes a "Data location" picker (Choose… / Reset).
+- `recordings/` is ephemeral; a startup sweep removes orphans
   (meetings that never reached `.summarized`).
 
 ---

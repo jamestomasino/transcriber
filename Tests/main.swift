@@ -1540,6 +1540,55 @@ do {
     check(false, "notification: \(error)")
 }
 
+// MARK: - Storage directory (pure resolve)
+section("storage: StorageDirectory resolves the data root")
+
+// Default (nil storageDirectory) → ends in Application Support/Transcriber.
+let sdDefault = AppSettings()
+let sdDefaultBase = StorageDirectory.base(settings: sdDefault)
+check(
+    sdDefaultBase.path.hasSuffix("/Transcriber"),
+    "default: base ends in …/Transcriber (got \(sdDefaultBase.path))"
+)
+check(
+    StorageDirectory.meetingsURL(settings: sdDefault).lastPathComponent == "meetings.json",
+    "default: meetingsURL is <base>/meetings.json"
+)
+check(
+    StorageDirectory.recordingsURL(settings: sdDefault).lastPathComponent == "recordings",
+    "default: recordingsURL is <base>/recordings"
+)
+// meetings.json and recordings live under the same base.
+check(
+    StorageDirectory.meetingsURL(settings: sdDefault).deletingLastPathComponent()
+        == StorageDirectory.recordingsURL(settings: sdDefault).deletingLastPathComponent(),
+    "default: meetings + recordings share the same base directory"
+)
+
+// Custom storageDirectory → that directory is the base verbatim.
+let sdCustomDir = FileManager.default.temporaryDirectory
+    .appendingPathComponent("transcriber-storage-\(UUID().uuidString)")
+let sdCustom = AppSettings(storageDirectory: sdCustomDir)
+check(
+    StorageDirectory.base(settings: sdCustom) == sdCustomDir,
+    "custom: base is the user's directory verbatim"
+)
+check(
+    StorageDirectory.meetingsURL(settings: sdCustom)
+        == sdCustomDir.appendingPathComponent("meetings.json"),
+    "custom: meetings.json is inside the user's directory"
+)
+check(
+    StorageDirectory.recordingsURL(settings: sdCustom).path
+        == sdCustomDir.appendingPathComponent("recordings").path,
+    "custom: recordings is inside the user's directory"
+)
+// Custom base is *not* the Application Support default.
+check(
+    StorageDirectory.base(settings: sdCustom) != StorageDirectory.base(settings: sdDefault),
+    "custom: base differs from the default"
+)
+
 // MARK: - Report
 print("\n\(passed) passed, \(failed) failed")
 if failed > 0 {
