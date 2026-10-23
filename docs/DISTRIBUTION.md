@@ -287,10 +287,14 @@ If you'd rather distribute through the Mac App Store instead:
 - The app **must run in the App Sandbox** (`com.apple.security.app-sandbox`).
   Add entitlements for microphone (`com.apple.security.device.audio-input`)
   and outbound network (`com.apple.security.network.client`).
-- **The catch:** the "capture system audio" feature (tapping the system output
-  via CoreAudio) is the part that fights the sandbox. Microphone capture is
-  fine; system-wide audio is the risk. If that feature is essential, Route A
-  (Developer ID, no sandbox) is the pragmatic choice.
+- **The catch:** the "capture system audio" feature is implemented with
+  **ScreenCaptureKit** (`SCStream` + `capturesAudio`, see
+  `Sources/App/RealAudioCapture.swift`) and is gated by the **Screen Recording**
+  TCC permission (`kTCCServiceScreenCapture`). That is the part that fights the
+  sandbox — ScreenCaptureKit system-audio capture is not something the App
+  Sandbox grants. Microphone capture is fine; system-wide audio is the risk. If
+  that feature is essential, Route A (Developer ID, no sandbox) is the pragmatic
+  choice.
 - Notarization is handled by the store; you still sign with the App Store
   certificate and upload via `xcrun altool`/Transporter or Xcode.
 
@@ -302,10 +306,13 @@ system-audio capture.
 
 ## 7. Entitlements (only if you need them)
 
-The current app needs **no entitlements file** for Route A: outbound network
-is allowed under hardened runtime by default, and microphone access is
-gated by the `NSMicrophoneUsageDescription` string (already in the
-Info.plist) + the TCC prompt.
+The current app needs **no entitlements file** for Route A. Its runtime
+permissions are all **TCC prompts**, not entitlements:
+- **Microphone** — gated by the `NSMicrophoneUsageDescription` string (already
+  in the Info.plist) + the TCC prompt.
+- **Screen Recording** — required for system-audio capture (ScreenCaptureKit,
+  see §6). No Info.plist usage string is needed; macOS prompts on first use.
+- **Outbound network** — allowed under hardened runtime by default.
 
 If you later add a feature that needs one (e.g. AppleScript automation), add a
 `Transcriber.entitlements` and pass it to `codesign --entitlements`. For the
