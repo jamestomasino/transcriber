@@ -3,6 +3,7 @@ import AppKit
 import AVFoundation
 import Speech
 import CoreGraphics
+import ScreenCaptureKit
 
 #if canImport(TranscriberCore)
 import TranscriberCore
@@ -21,6 +22,8 @@ struct OnboardingView: View {
     @State private var systemStatus = PermissionStatus.notRequested
     @State private var speechStatus = PermissionStatus.notRequested
     @State private var pendingPermission: String?
+    @State private var hasRequestedScreenAccess = false
+    @State private var checkingScreenAccess = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -31,13 +34,7 @@ struct OnboardingView: View {
                 permission("Microphone", detail: "Records your voice.", status: micStatus, pane: "Microphone", request: requestMicrophone)
             }
             if vm.settings.captureSystem {
-                permission("Screen Recording", detail: "Captures other people’s voices from apps. No video is saved.", status: systemStatus, pane: "ScreenCapture") {
-                    // Unlike mic and Speech, CoreGraphics exposes no separate
-                    // not-determined status. Try the prompt once; if access is
-                    // still unavailable, offer Settings (also handles an earlier denial).
-                    systemStatus = CGRequestScreenCaptureAccess() ? .allowed : .denied
-                    refresh()
-                }
+                permission("Screen Recording", detail: "Captures other people’s voices from apps. No video is saved.", status: systemStatus, pane: "ScreenCapture", request: requestScreenAccess)
                 if systemStatus == .denied {
                     Text("Enable Transcriber under Privacy & Security → Screen & System Audio Recording (Screen Recording on older macOS). If macOS asks, quit and reopen Transcriber to apply access.")
                         .font(.caption).foregroundStyle(.secondary)
@@ -112,17 +109,51 @@ struct OnboardingView: View {
         }
     }
 
+    private func requestScreenAccess() {
+        pendingPermission = "Screen Recording"
+        hasRequestedScreenAccess = true
+        systemStatus = CGRequestScreenCaptureAccess() ? .allowed : .denied
+        pendingPermission = nil
+        refresh()
+    }
+
+    private func refreshScreenAccess() {
+        let preflightAllowed = CGPreflightScreenCaptureAccess()
+        // CoreGraphics can retain a stale denial after access changes in
+        // System Settings. Once access has been requested, check the same
+        // ScreenCaptureKit API used by recording, without starting a stream.
+        // Do not run this on a fresh install: enumeration can prompt for access.
+        guard hasRequestedScreenAccess else {
+            if preflightAllowed { systemStatus = .allowed }
+            else if systemStatus == .allowed { systemStatus = .denied }
+            return
+        }
+        guard !checkingScreenAccess, pendingPermission != "Screen Recording" else { return }
+        checkingScreenAccess = true
+        Task { @MainActor in
+            defer { checkingScreenAccess = false }
+            do {
+                _ = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+                systemStatus = .allowed
+            } catch {
+                let error = error as NSError
+                if error.domain == SCStreamErrorDomain,
+                   error.code == SCStreamError.Code.userDeclined.rawValue {
+                    systemStatus = .denied
+                } else if preflightAllowed {
+                    systemStatus = .allowed
+                }
+            }
+        }
+    }
+
     private func refresh() {
         switch AVAudioApplication.shared.recordPermission {
         case .granted: micStatus = .allowed
         case .undetermined: micStatus = .notRequested
         default: micStatus = .denied
         }
-        if CGPreflightScreenCaptureAccess() {
-            systemStatus = .allowed
-        } else if systemStatus == .allowed {
-            systemStatus = .denied
-        }
+        refreshScreenAccess()
         switch SFSpeechRecognizer.authorizationStatus() {
         case .authorized: speechStatus = .allowed
         case .notDetermined: speechStatus = .notRequested
