@@ -3,6 +3,7 @@ import AVFoundation
 import ScreenCaptureKit
 import CoreMedia
 import CoreAudio
+import AudioToolbox
 
 #if canImport(TranscriberCore)
 import TranscriberCore
@@ -36,6 +37,11 @@ final class AVAudioCapture: AudioCapture, @unchecked Sendable {
     private var _status: [AudioSource: AudioCaptureError] = [:]
     private var _levels: [AudioSource: Float] = [:]
     private var _session: AVCaptureSession?
+    private let inputDeviceUID: () -> String?
+
+    init(inputDeviceUID: @escaping () -> String? = { nil }) {
+        self.inputDeviceUID = inputDeviceUID
+    }
 
     var status: [AudioSource: AudioCaptureError] {
         lock.lock(); defer { lock.unlock() }
@@ -62,7 +68,9 @@ final class AVAudioCapture: AudioCapture, @unchecked Sendable {
         lock.lock(); _status = [:]; _levels = [:]; lock.unlock()
 
         // The session reports live levels back to us via this sink.
-        let session = AVCaptureSession(directory: directory, levelSink: { [weak self] source, v in
+        let session = AVCaptureSession(directory: directory, errorSink: { [weak self] source, error in
+            self?.setStatus(source, error)
+        }, levelSink: { [weak self] source, v in
             self?.setLevel(source, v)
         })
 
@@ -70,7 +78,7 @@ final class AVAudioCapture: AudioCapture, @unchecked Sendable {
 
         if sources.contains(.mic) {
             do {
-                try await session.startMic()
+                try await session.startMic(deviceUID: inputDeviceUID())
                 startedAny = true
             } catch {
                 setStatus(.mic, Self.error(for: .mic, error))
@@ -117,6 +125,9 @@ final class AVAudioCapture: AudioCapture, @unchecked Sendable {
 final class AVCaptureSession: AudioCaptureSession, @unchecked Sendable {
     private let directory: URL
     private let levelSink: (AudioSource, Float) -> Void
+    private let errorSink: (AudioSource, AudioCaptureError) -> Void
+    private let startedAt = Date()
+    private var startOffsets: [AudioSource: TimeInterval] = [:]
     private let lock = NSLock()
 
     // Mic.
@@ -129,15 +140,17 @@ final class AVCaptureSession: AudioCaptureSession, @unchecked Sendable {
     private var scDelegate: SystemAudioDelegate?
     private var sysFile: AVAudioFile?
     private var sysStarted = false
+    private let systemQueue = DispatchQueue(label: "Transcriber.systemAudio")
 
-    init(directory: URL, levelSink: @escaping (AudioSource, Float) -> Void) {
+    init(directory: URL, errorSink: @escaping (AudioSource, AudioCaptureError) -> Void, levelSink: @escaping (AudioSource, Float) -> Void) {
         self.directory = directory
+        self.errorSink = errorSink
         self.levelSink = levelSink
     }
 
     // MARK: Mic
 
-    func startMic() async throws {
+    func startMic(deviceUID: String?) async throws {
         // Permission (macOS).
         var perm = AVAudioApplication.shared.recordPermission
         if perm == .undetermined {
@@ -150,6 +163,18 @@ final class AVCaptureSession: AudioCaptureSession, @unchecked Sendable {
 
         let engine = AVAudioEngine()
         let input = engine.inputNode
+        if let deviceUID {
+            guard let device = AudioDevices.inputs().first(where: { $0.id == deviceUID }),
+                  let unit = input.audioUnit else {
+                throw AudioCaptureError.sourceFailed(source: .mic, detail: "The selected microphone is disconnected. Choose another input in Settings.")
+            }
+            var id = device.audioID
+            guard AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice,
+                                       kAudioUnitScope_Global, 0, &id,
+                                       UInt32(MemoryLayout<AudioDeviceID>.size)) == noErr else {
+                throw AudioCaptureError.sourceFailed(source: .mic, detail: "Could not select the microphone. Choose another input in Settings.")
+            }
+        }
         let format = input.outputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0 else {
             throw AudioCaptureError.sourceFailed(source: .mic, detail: "No input device / invalid format.")
@@ -162,13 +187,21 @@ final class AVCaptureSession: AudioCaptureSession, @unchecked Sendable {
             AVNumberOfChannelsKey: format.channelCount,
             AVLinearPCMBitDepthKey: 32,
             AVLinearPCMIsFloatKey: true,
-            AVLinearPCMIsNonInterleaved: true,
+            AVLinearPCMIsNonInterleaved: false,
         ]
         let file = try AVAudioFile(forWriting: url, settings: settings)
+        var started = false
+        defer {
+            if !started {
+                Self.closeAudioFile(file)
+                try? FileManager.default.removeItem(at: url)
+            }
+        }
 
         let sink = levelSink
+        let failure = errorSink
         input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
-            do { try file.write(from: buffer) } catch { /* keep recording */ }
+            do { try file.write(from: buffer) } catch { failure(.mic, .sourceFailed(source: .mic, detail: error.localizedDescription)) }
             sink(.mic, Self.rms(of: buffer))
         }
 
@@ -182,7 +215,9 @@ final class AVCaptureSession: AudioCaptureSession, @unchecked Sendable {
         micEngine = engine
         micFile = file
         micStarted = true
+        startOffsets[.mic] = Date().timeIntervalSince(startedAt)
         lock.unlock()
+        started = true
     }
 
     // MARK: System audio
@@ -199,9 +234,10 @@ final class AVCaptureSession: AudioCaptureSession, @unchecked Sendable {
         if #available(macOS 15.0, *) { config.captureMicrophone = false }
         config.sampleRate = 48000
         config.channelCount = 2
+        config.excludesCurrentProcessAudio = true
         config.showsCursor = false
-        config.width = 1
-        config.height = 1
+        config.width = 2
+        config.height = 2
 
         let url = directory.appendingPathComponent("system.caf")
         // SC delivers float32 deinterleaved PCM; write it as such.
@@ -211,13 +247,25 @@ final class AVCaptureSession: AudioCaptureSession, @unchecked Sendable {
             AVNumberOfChannelsKey: 2,
             AVLinearPCMBitDepthKey: 32,
             AVLinearPCMIsFloatKey: true,
-            AVLinearPCMIsNonInterleaved: true,
+            AVLinearPCMIsNonInterleaved: false,
         ]
         let file = try AVAudioFile(forWriting: url, settings: settings)
+        var started = false
+        defer {
+            if !started {
+                Self.closeAudioFile(file)
+                try? FileManager.default.removeItem(at: url)
+            }
+        }
 
         let sink = levelSink
-        let delegate = SystemAudioDelegate(file: file) { v in sink(.system, v) }
+        let failure = errorSink
+        let delegate = SystemAudioDelegate(file: file, errorSink: { error in
+            failure(.system, .sourceFailed(source: .system, detail: error.localizedDescription))
+        }, levelSink: { v in sink(.system, v) })
         let stream = SCStream(filter: filter, configuration: config, delegate: delegate)
+        try stream.addStreamOutput(delegate, type: .audio,
+                                   sampleHandlerQueue: systemQueue)
 
         do {
             try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
@@ -238,7 +286,17 @@ final class AVCaptureSession: AudioCaptureSession, @unchecked Sendable {
         scDelegate = delegate
         sysFile = file
         sysStarted = true
+        startOffsets[.system] = Date().timeIntervalSince(startedAt)
         lock.unlock()
+        started = true
+    }
+
+    var audio: CapturedAudio {
+        lock.lock(); defer { lock.unlock() }
+        var files: [AudioSource: URL] = [:]
+        if micStarted { files[.mic] = directory.appendingPathComponent("mic.caf") }
+        if sysStarted { files[.system] = directory.appendingPathComponent("system.caf") }
+        return CapturedAudio(fileURLs: files, startOffsets: startOffsets)
     }
 
     // MARK: Stop
@@ -270,6 +328,9 @@ final class AVCaptureSession: AudioCaptureSession, @unchecked Sendable {
                     s.stopCapture { _ in cont.resume() }
                 }
             }
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                systemQueue.async { continuation.resume() }
+            }
             scStream = nil
             scDelegate = nil
             if let f = sysFile {
@@ -279,14 +340,14 @@ final class AVCaptureSession: AudioCaptureSession, @unchecked Sendable {
             sysFile = nil
         }
 
-        return CapturedAudio(fileURLs: urls)
+        return CapturedAudio(fileURLs: urls, startOffsets: startOffsets)
     }
 
     /// `AVAudioFile.close()` is macOS 15+; on earlier systems ARC releases the
     /// file and flushes on deinit, so we guard the call.
     private static func closeAudioFile(_ file: AVAudioFile) {
         if #available(macOS 15.0, *) {
-            try? file.close()
+            file.close()
         }
     }
 
@@ -305,74 +366,37 @@ final class AVCaptureSession: AudioCaptureSession, @unchecked Sendable {
 /// Receives SCStream audio sample buffers and writes them to an `AVAudioFile`.
 /// SC delivers `CMSampleBuffer`s of float32 PCM; we convert to
 /// `AVAudioPCMBuffer` and write.
-final class SystemAudioDelegate: NSObject, SCStreamDelegate {
+final class SystemAudioDelegate: NSObject, SCStreamDelegate, SCStreamOutput {
     private let file: AVAudioFile
     private let levelSink: (Float) -> Void
+    private let errorSink: (Error) -> Void
 
-    init(file: AVAudioFile, levelSink: @escaping (Float) -> Void) {
+    init(file: AVAudioFile, errorSink: @escaping (Error) -> Void, levelSink: @escaping (Float) -> Void) {
         self.file = file
+        self.errorSink = errorSink
         self.levelSink = levelSink
     }
 
-    func stream(_ stream: SCStream, didOutput sampleBuffer: CMSampleBuffer, ofType type: SCStreamOutputType) {
+    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .audio else { return }
 
-        // 1) Size the AudioBufferList.
-        var ablSizeNeeded = 0
-        var blockBuffer: CMBlockBuffer?
-        let status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
-            sampleBuffer,
-            bufferListSizeNeededOut: &ablSizeNeeded,
-            bufferListOut: nil,
-            bufferListSize: 0,
-            blockBufferAllocator: nil,
-            blockBufferMemoryAllocator: nil,
-            flags: 0,
-            blockBufferOut: &blockBuffer)
-        guard status == noErr, ablSizeNeeded > 0 else { return }
-
-        // 2) Allocate and fill the AudioBufferList.
-        let ablBytes = UnsafeMutableRawPointer.allocate(byteCount: ablSizeNeeded, alignment: 16)
-        defer { ablBytes.deallocate() }
-        let ablRaw = UnsafeMutablePointer<AudioBufferList>(OpaquePointer(ablBytes))
-        let status2 = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
-            sampleBuffer,
-            bufferListSizeNeededOut: nil,
-            bufferListOut: ablRaw,
-            bufferListSize: ablSizeNeeded,
-            blockBufferAllocator: nil,
-            blockBufferMemoryAllocator: nil,
-            flags: 0,
-            blockBufferOut: &blockBuffer)
-        guard status2 == noErr else { return }
-        let abl = UnsafeMutableAudioBufferListPointer(ablRaw)
-
-        // 3) Format.
-        guard let fmtDesc = CMSampleBufferGetFormatDescription(sampleBuffer),
-              let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(fmtDesc)?.pointee else { return }
-        let isFloat = (asbd.mFormatFlags & kAudioFormatFlagIsFloat) != 0
-        let bytesPerSample = isFloat ? 4 : 2
-        let frames = Int(abl[0].mDataByteSize) / bytesPerSample
-        let common: AVAudioCommonFormat = isFloat ? .pcmFormatFloat32 : .pcmFormatInt16
-        guard let fmt = AVAudioFormat(commonFormat: common,
-                                      sampleRate: asbd.mSampleRate,
-                                      channels: AVAudioChannelCount(asbd.mChannelsPerFrame),
-                                      interleaved: false),
-              let buf = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: AVAudioFrameCount(frames)) else { return }
+        guard CMSampleBufferDataIsReady(sampleBuffer),
+              let description = CMSampleBufferGetFormatDescription(sampleBuffer),
+              let streamDescription = CMAudioFormatDescriptionGetStreamBasicDescription(description) else { return }
+        var asbd = streamDescription.pointee
+        let frames = CMSampleBufferGetNumSamples(sampleBuffer)
+        guard frames > 0, frames <= Int(Int32.max),
+              let format = AVAudioFormat(streamDescription: &asbd),
+              let buf = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames)) else { return }
         buf.frameLength = AVAudioFrameCount(frames)
+        guard CMSampleBufferCopyPCMDataIntoAudioBufferList(sampleBuffer, at: 0, frameCount: Int32(frames),
+                                                           into: buf.mutableAudioBufferList) == noErr else { return }
 
-        // 4) Copy.
-        if let fd = buf.floatChannelData {
-            for i in 0..<abl.count {
-                if let src = abl[i].mData {
-                    fd[i].update(from: src.assumingMemoryBound(to: Float.self), count: frames)
-                }
-            }
-        }
-
-        do { try file.write(from: buf) } catch { /* keep going */ }
+        do { try file.write(from: buf) } catch { errorSink(error) }
         levelSink(Self.rms(of: buf))
     }
+
+    func stream(_ stream: SCStream, didStopWithError error: Error) { errorSink(error) }
 
     private static func rms(of buffer: AVAudioPCMBuffer) -> Float {
         guard let ch = buffer.floatChannelData, buffer.frameLength > 0 else { return 0 }

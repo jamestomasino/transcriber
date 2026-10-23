@@ -1,13 +1,17 @@
 import SwiftUI
 import AppKit
 
+#if canImport(TranscriberCore)
+import TranscriberCore
+#endif
+
 @main
 struct TranscriberApp: App {
-    /// Single shared view model so the main window and the (future) menu-bar
-    /// item always agree on state. Wired to the real AVFoundation +
+    /// Single shared view model so the main window and menu-bar item agree. Wired to the real AVFoundation +
     /// ScreenCaptureKit capture and the real pipeline processor (chosen from
     /// the user's settings).
     @StateObject private var vm: TranscriberViewModel
+    @Environment(\.openWindow) private var openWindow
 
     init() {
         let settingsStore = SettingsStore(url: Self.settingsURL)
@@ -17,12 +21,11 @@ struct TranscriberApp: App {
         // settings.json itself always lives in Application Support so the app
         // can find it on launch regardless of the data location.
         let meetingStore = MeetingStore(url: StorageDirectory.meetingsURL(settings: settings))
-        // Point the recordings directory at the same resolved root. Capture the
-        // *store* (not the settings snapshot) so a directory change made in
-        // Settings is picked up on the next launch.
-        RecordingsDirectory.baseDirectory = { StorageDirectory.recordingsURL(settings: settingsStore.load()) }
+        // Keep recordings and history on the same root for the whole session.
+        // A location change in Settings takes effect on the next launch.
+        RecordingsDirectory.baseDirectory = { StorageDirectory.recordingsURL(settings: settings) }
         _vm = StateObject(wrappedValue: TranscriberViewModel(
-            capture: AVAudioCapture(),
+            capture: AVAudioCapture(inputDeviceUID: { settingsStore.load().inputDeviceID }),
             processor: ProcessorFactory.make(settings: settings),
             settings: settings,
             settingsStore: settingsStore,
@@ -45,13 +48,13 @@ struct TranscriberApp: App {
     }
 
     var body: some Scene {
-        WindowGroup(id: "main") {
+        Window("Transcriber", id: "main") {
             ContentView(vm: vm)
         }
         .windowResizability(.contentMinSize)
         .windowStyle(.automatic)
         .commands {
-            CommandGroup(replacing: .appInfo) {
+            CommandGroup(replacing: .appTermination) {
                 Button("Quit Transcriber") { NSApplication.shared.terminate(nil) }
                     .keyboardShortcut("q")
             }
@@ -66,19 +69,26 @@ struct TranscriberApp: App {
         // A menu-bar item with a live Start/Stop so a meeting can be started or
         // stopped without the main window focused. macOS 13+, target is 14.
         MenuBarExtra {
-            if vm.isRecording {
-                Label("Recording…", systemImage: "record.circle.fill")
+            if vm.isRecording || vm.isStopping {
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    let seconds = max(0, Int(context.date.timeIntervalSince(vm.activeMeeting?.startedAt ?? context.date)))
+                    Label(vm.isStopping ? "Finishing recording…" : String(format: "Recording %d:%02d:%02d", seconds / 3600, seconds / 60 % 60, seconds % 60), systemImage: "record.circle.fill")
+                }
                     .foregroundStyle(.red)
                     .disabled(true)
                 Divider()
                 Button("Stop") { vm.stop() }
+                    .disabled(vm.isStarting || vm.isStopping)
                     .keyboardShortcut(".", modifiers: .command)
             } else {
                 Button("Start meeting") { vm.start(title: nil) }
+                    .disabled(vm.settings.requestedSources.isEmpty || vm.isStarting || vm.isStopping)
                     .keyboardShortcut("m", modifiers: [.command, .shift])
             }
             Divider()
+            SettingsLink { Text("Settings…") }
             Button("Open Transcriber") {
+                openWindow(id: "main")
                 NSApp.activate(ignoringOtherApps: true)
             }
             Button("Quit") { NSApplication.shared.terminate(nil) }

@@ -1,5 +1,9 @@
 import Foundation
 
+#if canImport(TranscriberCore)
+import TranscriberCore
+#endif
+
 // MARK: - Real model downloader (App)
 //
 // The App-side `ModelDownloader`: streams a model from its URL to disk. Kept in
@@ -57,7 +61,7 @@ public enum ProcessorFactory {
         }
         let summarizer: any Summarizer = makeSummarizer(settings: settings, http: http)
         return PipelineProcessor(
-            transcriber: transcriber,
+            transcriber: PreparingTranscriber(inner: transcriber, prepareSingleSource: settings.transcriptionBackend == .deepgram),
             diarizer: diarizer,
             summarizer: summarizer,
             language: settings.language
@@ -70,7 +74,7 @@ public enum ProcessorFactory {
         case .local:
             // On-device Apple Intelligence — no key, no network. The `http`
             // client is unused here; the model runs locally.
-            return LocalSummarizer()
+            return ChunkingSummarizer(inner: LocalSummarizer())
         case .openai:
             return OpenAISummarizer(model: settings.summaryModel, apiKey: { Keychain.get("openai_api_key") }, http: http)
         case .anthropic:

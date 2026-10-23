@@ -35,10 +35,12 @@ public protocol HTTPClient: Sendable {
 }
 
 /// Errors from the HTTP layer.
-public enum HTTPError: Error, Equatable, Sendable {
+public enum HTTPError: LocalizedError, Equatable, Sendable {
     case badStatus(Int)
     case noBody
     case decoding(String)
+
+    public var errorDescription: String? { description }
 
     public var description: String {
         switch self {
@@ -138,6 +140,7 @@ public final class RetryingHTTPClient: HTTPClient, @unchecked Sendable {
     public func send(_ request: HTTPRequest) async throws -> HTTPResponse {
         var attempt = 0
         while true {
+            try Task.checkCancellation()
             attempt += 1
             do {
                 return try await inner.send(request)
@@ -147,7 +150,7 @@ public final class RetryingHTTPClient: HTTPClient, @unchecked Sendable {
                     throw error
                 }
                 if backoffDelay > 0 {
-                    try? await Task.sleep(nanoseconds: UInt64(backoffDelay * 1_000_000_000))
+                    try await Task.sleep(nanoseconds: UInt64(backoffDelay * 1_000_000_000))
                 }
             }
         }

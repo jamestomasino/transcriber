@@ -18,6 +18,7 @@ import TranscriberCore
 // SwiftUI; the underlying `AppSettings` + persistence stay pure in Core.
 struct SettingsView: View {
     @ObservedObject var vm: TranscriberViewModel
+    @State private var inputDevices: [AudioInputDevice] = []
 
     /// A `Binding` that reads from `vm.settings` and writes through
     /// `updateSettings` (which persists). Using `updateSettings` for every
@@ -35,6 +36,24 @@ struct SettingsView: View {
             Section("Audio") {
                 Toggle("Capture microphone", isOn: binding(\.captureMic))
                 Toggle("Capture system audio", isOn: binding(\.captureSystem))
+                Picker("Microphone", selection: Binding(
+                    get: { vm.settings.inputDeviceID ?? "" },
+                    set: { uid in vm.updateSettings {
+                        $0.inputDeviceID = uid.isEmpty ? nil : uid
+                        $0.inputDeviceName = inputDevices.first(where: { $0.id == uid })?.name
+                    } }
+                )) {
+                    Text("System default").tag("")
+                    ForEach(inputDevices) { device in Text(device.name).tag(device.id) }
+                    if let uid = vm.settings.inputDeviceID, !inputDevices.contains(where: { $0.id == uid }) {
+                        Text("\(vm.settings.inputDeviceName ?? "Selected microphone") (disconnected)").tag(uid)
+                    }
+                }
+                .disabled(!vm.settings.captureMic || vm.isRecording)
+                Button("Refresh microphones") { inputDevices = AudioDevices.inputs() }
+                if vm.settings.requestedSources.isEmpty {
+                    Text("Enable at least one audio source to start a meeting.").foregroundStyle(.orange)
+                }
             }
 
             Section {
@@ -55,7 +74,9 @@ struct SettingsView: View {
                 }
                 TextField("Language code (e.g. en)", text: binding(\.language))
                 if vm.settings.transcriptionBackend == .local {
-                    TextField("Whisper model (e.g. base.en)", text: binding(\.whisperModel))
+                    Text("Runs on this Mac with Apple Speech — private, offline, no model to download.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
                 if vm.settings.transcriptionBackend == .deepgram {
                     APIKeyRow(title: "Deepgram API key", keyID: "deepgram_api_key")
@@ -73,7 +94,7 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
-                    TextField("Model (e.g. gpt-4o-mini / claude-3-5-sonnet)", text: binding(\.summaryModel))
+                    TextField("Model identifier", text: binding(\.summaryModel))
                 }
                 if vm.settings.summaryBackend == .openai {
                     APIKeyRow(title: "OpenAI API key", keyID: "openai_api_key")
@@ -88,6 +109,7 @@ struct SettingsView: View {
                 Toggle("Notify when a summary is ready", isOn: binding(\.notifyOnSummary))
             }
         }
+        .onAppear { inputDevices = AudioDevices.inputs() }
         .formStyle(.grouped)
         .frame(minWidth: 440, minHeight: 520)
     }
@@ -103,6 +125,7 @@ private struct StorageDirectoryRow: View {
     @ObservedObject var vm: TranscriberViewModel
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
         HStack {
             Text("Data location")
                 .font(.subheadline)
@@ -119,6 +142,10 @@ private struct StorageDirectoryRow: View {
                 }
             }
         }
+        Text("Location changes take effect after restarting Transcriber. Existing meetings stay in their original folder.")
+            .font(.caption).foregroundStyle(.secondary)
+        }
+        .disabled(vm.isRecording)
     }
 
     private var displayPath: String {
@@ -185,7 +212,7 @@ private struct APIKeyRow: View {
                     .foregroundStyle(.green)
             }
             if failed {
-                Text("Couldn't save to the Keychain.")
+                Text("Couldn't update the Keychain.")
                     .font(.caption)
                     .foregroundStyle(.red)
             }
@@ -208,10 +235,12 @@ private struct APIKeyRow: View {
     }
 
     private func clear() {
-        Keychain.delete(keyID)
-        hasStored = false
-        value = ""
-        justSaved = false
-        failed = false
+        do {
+            try Keychain.delete(keyID)
+            hasStored = false
+            value = ""
+            justSaved = false
+            failed = false
+        } catch { failed = true }
     }
 }

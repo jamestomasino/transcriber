@@ -30,6 +30,12 @@ private func check(_ cond: Bool, _ label: String, _ file: String = #file, _ line
     }
 }
 
+// Every view-model test gets an isolated recordings root, including tests
+// that reset an override. A nil override would sweep the user's real files.
+let suiteRoot = FileManager.default.temporaryDirectory.appendingPathComponent("transcriber-suite-\(UUID().uuidString)")
+let suiteRecordings = suiteRoot.appendingPathComponent("recordings")
+RecordingsDirectory.baseDirectory = { suiteRecordings }
+
 // A clock we can advance by hand so assertions are exact (no sleeps).
 // Thread-safe (lock-guarded) so it satisfies `Clock: Sendable`.
 final class ManualClock: Clock, @unchecked Sendable {
@@ -247,7 +253,7 @@ do {
 } catch {
     check(false, "VM start/stop: \(error)")
 }
-RecordingsDirectory.baseDirectory = nil
+RecordingsDirectory.baseDirectory = { suiteRecordings }
 try? FileManager.default.removeItem(at: FileManager.default.temporaryDirectory
     .appendingPathComponent("transcriber-vm-\(UUID().uuidString)", isDirectory: true))
 
@@ -511,7 +517,7 @@ do {
 } catch {
     check(false, "partial-failure VM: \(error)")
 }
-RecordingsDirectory.baseDirectory = nil
+RecordingsDirectory.baseDirectory = { suiteRecordings }
 
 // MARK: - Phase 4: pipeline composition
 section("pipeline: transcribe → diarize → summarize")
@@ -626,9 +632,9 @@ do {
     check(!defaultPolicy.keepTranscript, "default: transcript not kept")
     check(!defaultPolicy.keepAudio, "default: audio not kept")
 
-    // Keep transcript + audio: nothing deleted.
+    // Keep original transcript + audio; the derived mix is always deleted.
     let keepAll = RetentionPolicy(settings: AppSettings(keepTranscriptAfterSummary: true, keepAudioAfterSummary: true))
-    check(keepAll.artifactsToDelete(for: meeting).isEmpty, "keep-all policy deletes nothing")
+    check(keepAll.artifactsToDelete(for: meeting) == [dir.appendingPathComponent(CapturedAudio.preparedFileName)], "keep-all retains originals but deletes the transient mix")
     check(keepAll.keepTranscript && keepAll.keepAudio, "keep-all flags are set")
 } catch {
     check(false, "retention: \(error)")
@@ -1618,6 +1624,298 @@ check(
     StorageDirectory.base(settings: sdCustom) != StorageDirectory.base(settings: sdDefault),
     "custom: base differs from the default"
 )
+
+// MARK: - Final review regressions
+section("hardening: fresh storage, backup recovery, and old meeting files")
+do {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("transcriber-final-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let url = root.appendingPathComponent("nested/meetings.json")
+    let first = Meeting(title: "First", status: .summarized, startedAt: .distantPast,
+                        createdAt: .distantPast, lastActivityAt: .distantPast,
+                        summary: MeetingSummary(overall: "Persisted"))
+    let store = MeetingStore(url: url)
+    check(store.save([first]), "first save creates missing parent directories")
+    check(MeetingStore(url: url).load() == [first], "fresh store reads durable summary")
+    check(store.save([]), "next save succeeds")
+    try Data("broken".utf8).write(to: url)
+    check(MeetingStore(url: url).load() == [first], "corrupt live file recovers previous good backup")
+    check(MeetingStore(url: url).save([first]), "save repairs corrupt live file")
+    check(MeetingStore(url: url.appendingPathExtension("bak")).load() == [first], "repair preserves valid backup")
+    let settingsURL = root.appendingPathComponent("new/settings.json")
+    SettingsStore(url: settingsURL).save(AppSettings(captureSystem: false))
+    check(!SettingsStore(url: settingsURL).load().captureSystem, "settings save creates missing directory")
+    let old = try JSONDecoder().decode(Meeting.self, from: Data(#"{"title":"Legacy"}"#.utf8))
+    check(old.title == "Legacy" && old.transcript.isEmpty && old.failureReason == nil, "old meeting fields decode with defaults")
+    let memoryStore = MeetingStore.inMemory()
+    memoryStore.save([first])
+    check(!FileManager.default.fileExists(atPath: memoryStore.fileURL.path), "inMemory save never writes a backing file")
+} catch { check(false, "storage regressions: \(error)") }
+
+section("hardening: real Deepgram response and endpoint")
+do {
+    let file = FileManager.default.temporaryDirectory.appendingPathComponent("dg-final-\(UUID().uuidString).wav")
+    try Data([1, 2]).write(to: file)
+    defer { try? FileManager.default.removeItem(at: file) }
+    let response = Data(#"{"results":{"channels":[{"alternatives":[{"words":[{"word":"hello","punctuated_word":"Hello,","start":0,"end":0.4,"speaker":0},{"word":"yes","start":0.8,"end":1.3,"speaker":1}]}]}]}}"#.utf8)
+    let http = FakeHTTP(status: 200, body: response)
+    let segments = try await DeepgramTranscriber(apiKey: { "test" }, http: http)
+        .transcribe(audio: CapturedAudio(fileURLs: [.mic: file]), language: "en-US")
+    check(segments.map(\.speaker) == ["Speaker 1", "Speaker 2"], "numeric speakers remain distinct")
+    check(segments.first?.text == "Hello,", "word punctuation preserved")
+    check(segments.last?.endOffset == 1.3, "uses real end timestamp")
+    check(http.lastRequest?.url.path == "/v1/listen", "posts to the real listen endpoint without extra path")
+    check(URLComponents(url: http.lastRequest!.url, resolvingAgainstBaseURL: false)?.queryItems?.contains(URLQueryItem(name: "language", value: "en-US")) == true, "language uses URL query encoding")
+} catch { check(false, "Deepgram regressions: \(error)") }
+
+section("hardening: capture settings and artifact failures")
+do {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("transcriber-capture-final-\(UUID().uuidString)")
+    RecordingsDirectory.baseDirectory = { root }
+    defer { RecordingsDirectory.baseDirectory = { suiteRecordings }; try? FileManager.default.removeItem(at: root) }
+    let vm = TranscriberViewModel(capture: RecordingAudioCapture(directory: root), processor: FakeProcessor(),
+        settings: AppSettings(captureSystem: false, keepAudioAfterSummary: true), meetingStore: .inMemory())
+    let meeting = await vm.startAsync(title: "Mic only")
+    let duplicate = await vm.startAsync(title: "Must not replace")
+    check(duplicate.id == meeting.id && vm.meetings.count == 1, "a second Start keeps the original capture")
+    vm.delete(id: meeting.id)
+    check(vm.meetings.count == 1, "cannot delete a running capture")
+    await vm.stopAsync()
+    let stored = vm.meeting(id: meeting.id)!
+    check(stored.audioFileURLs[.mic] != nil && stored.audioFileURLs[.system] == nil, "start honors microphone-only settings")
+    let micFile = stored.audioFileURLs[.mic]!
+    vm.delete(id: meeting.id)
+    check(vm.meetings.isEmpty && !FileManager.default.fileExists(atPath: micFile.path), "delete removes retained audio immediately")
+
+    struct FailingArtifacts: MeetingArtifactManaging {
+        func sweep(liveIDs: Set<UUID>) -> [URL] { [] }
+        func remove(_ urls: [URL]) throws { throw CocoaError(.fileWriteNoPermission) }
+        func removeEmptyDirectory(for id: UUID) throws {}
+        func discard(_ meeting: Meeting) throws { throw CocoaError(.fileWriteNoPermission) }
+    }
+    let cleanupStore = MeetingStore.inMemory()
+    let failedVM = TranscriberViewModel(capture: RecordingAudioCapture(directory: root), processor: FakeProcessor(),
+        meetingStore: cleanupStore, artifacts: FailingArtifacts())
+    let failedMeeting = await failedVM.startAsync(title: "Cleanup failure")
+    await failedVM.stopAsync()
+    let failedRecord = failedVM.meeting(id: failedMeeting.id)!
+    check(failedRecord.status == .failed && !failedRecord.audioFileURLs.isEmpty, "cleanup failure retains file references for retry")
+    check(failedRecord.failureReason != nil, "failure reason is stored with its meeting")
+    failedVM.delete(id: failedMeeting.id)
+    check(failedVM.meetings.count == 1, "failed file deletion preserves meeting record")
+    let recovered = TranscriberViewModel(capture: RecordingAudioCapture(directory: root),
+        settings: AppSettings(keepAudioAfterSummary: true), meetingStore: cleanupStore)
+    check(recovered.meeting(id: failedMeeting.id)?.status == .summarized, "startup resumes pending cleanup using the saved summary")
+    check(recovered.meeting(id: failedMeeting.id)?.pendingArtifactDeletion.isEmpty == true, "recovered cleanup clears its persisted decision")
+    check(failedRecord.audioFileURLs.values.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) }, "recovery honors the original deletion decision after settings change")
+
+    let badStore = root.appendingPathComponent("history")
+    let saveVM = TranscriberViewModel(capture: RecordingAudioCapture(directory: root), processor: FakeProcessor(),
+        meetingStore: MeetingStore(url: badStore.appendingPathComponent("meetings.json")))
+    let saveMeeting = await saveVM.startAsync(title: "Save failure")
+    try FileManager.default.removeItem(at: badStore)
+    try Data().write(to: badStore)
+    await saveVM.stopAsync()
+    let saveRecord = saveVM.meeting(id: saveMeeting.id)!
+    check(saveRecord.status == .failed, "failed durable save fails the meeting")
+    check(saveRecord.audioFileURLs.values.allSatisfy { FileManager.default.fileExists(atPath: $0.path) }, "failed durable save does not destroy audio")
+    let blockedRetry = await saveVM.retry(id: saveMeeting.id)
+    check(!blockedRetry && saveRecord.audioFileURLs.values.allSatisfy { FileManager.default.fileExists(atPath: $0.path) }, "retry cannot delete audio while its summary is still unsaved")
+    saveVM.delete(id: saveMeeting.id)
+    check(saveVM.meeting(id: saveMeeting.id) != nil, "failed history deletion leaves a visible record to retry")
+} catch { check(false, "capture regressions: \(error)") }
+
+section("hardening: search includes decisions and action items")
+do {
+    let engine = MeetingEngine()
+    let m = engine.start(title: "Planning")
+    engine.markSummarized(id: m.id, summary: MeetingSummary(overall: "Next week", decisions: ["Use SQLite"], actionItems: ["Alex: prepare budget"]), speakerCount: 1)
+    check(engine.search("sqlite").count == 1, "search finds decisions")
+    check(engine.search("budget").count == 1, "search finds action items")
+}
+
+section("hardening: local summaries cover the middle of long meetings")
+do {
+    let source = [TranscriptSegment(speaker: "S1", text: String(repeating: "opening ", count: 100)),
+                  TranscriptSegment(speaker: "S2", text: "MIDDLE DECISION: launch on Friday."),
+                  TranscriptSegment(speaker: "S1", text: String(repeating: "closing ", count: 100))]
+    let chunks = ChunkingSummarizer.chunks(source, budget: 256)
+    check(chunks.count > 1, "long transcript is split into multiple requests")
+    check(chunks.allSatisfy { Summary.transcriptText($0).count <= 256 }, "every chunk fits the local budget")
+    check(chunks.flatMap { $0 }.map(\.text).joined() == source.map(\.text).joined(), "chunking preserves all speech, including the middle")
+    struct EchoSummary: Summarizer {
+        func summarize(segments: [TranscriptSegment], title: String) async throws -> MeetingSummary {
+            MeetingSummary(overall: segments.map(\.text).joined(), decisions: ["One shared decision"], model: "test")
+        }
+    }
+    let summary = try await ChunkingSummarizer(inner: EchoSummary(), transcriptBudget: 256).summarize(segments: source, title: "Long meeting")
+    check(summary.overall.contains("MIDDLE DECISION"), "long local summary includes the middle section")
+    check(summary.decisions == ["One shared decision"], "merging removes repeated decisions")
+    check(!summary.transcriptWasCapped, "complete section summaries are not marked truncated")
+    let unicode = [TranscriptSegment(speaker: "話者", text: String(repeating: "こんにちは🌍", count: 200))]
+    check(ChunkingSummarizer.chunks(unicode, budget: 256).flatMap { $0 }.map(\.text).joined() == unicode[0].text, "Unicode chunking preserves characters")
+} catch { check(false, "chunked summary: \(error)") }
+
+section("hardening: empty speech does not proceed to a destructive success")
+do {
+    struct SilentTranscriber: Transcriber {
+        func transcribe(audio: CapturedAudio, language: String) async throws -> [TranscriptSegment] { [] }
+    }
+    struct UnexpectedSummarizer: Summarizer {
+        func summarize(segments: [TranscriptSegment], title: String) async throws -> MeetingSummary {
+            check(false, "silent recording must not reach the summarizer")
+            return MeetingSummary(overall: "Invented")
+        }
+    }
+    let pipeline = PipelineProcessor(transcriber: SilentTranscriber(), diarizer: IdentityDiarizer(), summarizer: UnexpectedSummarizer())
+    let meeting = Meeting(title: "Silent", startedAt: .distantPast, createdAt: .distantPast, lastActivityAt: .distantPast)
+    do {
+        _ = try await pipeline.process(meeting: meeting, audio: CapturedAudio(), report: { _ in })
+        check(false, "empty transcription must fail")
+    } catch let error as LLMError {
+        check(error.message.contains("No speech"), "empty transcription gives a retryable explanation")
+    }
+} catch { check(false, "silent pipeline: \(error)") }
+
+section("hardening: cancellation preserves audio for retry")
+do {
+    struct SlowProcessor: MeetingProcessor {
+        func process(meeting: Meeting, audio: CapturedAudio, report: @Sendable (ProcessingProgress) -> Void) async throws -> ProcessedResult {
+            try await Task.sleep(nanoseconds: 2_000_000_000)
+            return ProcessedResult(segments: [], summary: MeetingSummary(overall: "Should not complete"))
+        }
+    }
+    let vm = TranscriberViewModel(capture: RecordingAudioCapture(directory: suiteRecordings), processor: SlowProcessor(), meetingStore: .inMemory())
+    let m = await vm.startAsync(title: "Cancel me")
+    let task = Task { await vm.stopAsync() }
+    while vm.progressByMeeting[m.id] == nil { await Task.yield() }
+    vm.cancelProcessing(id: m.id)
+    await task.value
+    let cancelled = vm.meeting(id: m.id)!
+    check(cancelled.status == .failed, "cancelled pipeline becomes retryable")
+    check(cancelled.failureReason?.contains("cancelled") == true, "cancelled meeting explains what happened")
+    check(!cancelled.audioFileURLs.isEmpty && cancelled.audioFileURLs.values.allSatisfy { FileManager.default.fileExists(atPath: $0.path) }, "cancellation preserves source audio")
+    check(vm.progressByMeeting[m.id] == nil, "cancelled meeting clears its progress")
+}
+
+section("hardening: provider defaults and invalid summary responses")
+do {
+    let vm = TranscriberViewModel(capture: RecordingAudioCapture(directory: suiteRecordings), settingsStore: .inMemory())
+    vm.updateSettings { $0.summaryBackend = .anthropic }
+    check(vm.settings.summaryModel == "claude-haiku-4-5", "switching providers selects a compatible model")
+    vm.updateSettings { $0.summaryBackend = .openai; $0.summaryModel = "custom-model" }
+    check(vm.settings.summaryModel == "custom-model", "explicit custom model is preserved")
+    for invalid in ["", "{\"overall\":\"truncated", "{}"] {
+        do { _ = try Summary.parseResponse(invalid); check(false, "invalid model response must fail") }
+        catch { check(true, "invalid model response preserves retry path") }
+    }
+    let fallback = try Summary.parseResponse("The team agreed to launch Friday.")
+    check(fallback.overall.contains("Friday"), "plain-text summary fallback remains supported")
+    let store = MeetingStore(url: suiteRoot.appendingPathComponent("backup/meetings.json"))
+    let failed = Meeting(title: "Private", status: .failed, startedAt: .distantPast, createdAt: .distantPast, lastActivityAt: .distantPast,
+                         transcript: [TranscriptSegment(speaker: "S1", text: "private transcript")])
+    store.save([failed])
+    store.save([], sanitizeBackup: true)
+    let backup = MeetingStore(url: store.fileURL.appendingPathExtension("bak")).load()
+    check(backup.isEmpty, "delete also removes retained transcripts from the backup")
+} catch { check(false, "final regressions: \(error)") }
+
+try? FileManager.default.removeItem(at: suiteRoot)
+
+section("hardening: local word timing becomes readable utterances")
+do {
+    let words = [TranscriptSegment(speaker: "S1", text: "Hello", startOffset: 0, endOffset: 0.4),
+                 TranscriptSegment(speaker: "S1", text: "there.", startOffset: 0.5, endOffset: 0.9),
+                 TranscriptSegment(speaker: "S1", text: "Next", startOffset: 3, endOffset: 3.5)]
+    let utterances = TranscriptSegment.utterances(from: words)
+    check(utterances.map(\.text) == ["Hello there.", "Next"], "words are grouped into readable utterances")
+    check(utterances[0].startOffset == 0 && utterances[0].endOffset == 0.9 && utterances[1].startOffset == 3, "utterances preserve actual timing and pauses")
+}
+
+section("hardening: a new capture cannot replace a session being stopped")
+actor StopGate {
+    var continuation: CheckedContinuation<CapturedAudio, Never>?
+    var observers: [CheckedContinuation<Void, Never>] = []
+    func stop() async -> CapturedAudio {
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+            for observer in observers { observer.resume() }
+            observers = []
+        }
+    }
+    func waitUntilStopping() async {
+        if continuation != nil { return }
+        await withCheckedContinuation { observers.append($0) }
+    }
+    func finish() { continuation?.resume(returning: CapturedAudio()); continuation = nil }
+}
+struct GatedSession: AudioCaptureSession {
+    let gate: StopGate
+    func stop() async throws -> CapturedAudio { await gate.stop() }
+}
+struct GatedCapture: AudioCapture {
+    let gate: StopGate
+    var status: [AudioSource: AudioCaptureError] { [:] }
+    func level(_ source: AudioSource) -> Float { 0 }
+    func start(sources: Set<AudioSource>, directory: URL) async throws -> AudioCaptureSession { GatedSession(gate: gate) }
+}
+do {
+    let gate = StopGate()
+    let vm = TranscriberViewModel(capture: GatedCapture(gate: gate), processor: FakeProcessor(), meetingStore: .inMemory())
+    let original = await vm.startAsync(title: "Original")
+    let stopping = Task { await vm.stopAsync() }
+    await gate.waitUntilStopping()
+    check(vm.isStopping, "capture finalization is visible to UI controls")
+    let replacement = await vm.startAsync(title: "Must wait")
+    check(replacement.id == original.id && vm.meetings.count == 1, "Start during Stop keeps the original session")
+    await gate.finish()
+    await stopping.value
+    check(!vm.isStopping && vm.meeting(id: original.id)?.status == .summarized, "original capture finishes normally and releases the guard")
+}
+
+section("hardening: a completed summary cannot release a newer Stop guard")
+actor FirstPipelineGate: MeetingProcessor {
+    var first = true
+    var continuation: CheckedContinuation<ProcessedResult, Never>?
+    var observers: [CheckedContinuation<Void, Never>] = []
+    let result = ProcessedResult(segments: [], summary: MeetingSummary(overall: "Saved"))
+    func process(meeting: Meeting, audio: CapturedAudio, report: @Sendable (ProcessingProgress) -> Void) async throws -> ProcessedResult {
+        guard first else { return result }
+        first = false
+        return await withCheckedContinuation { continuation in
+            self.continuation = continuation
+            for observer in observers { observer.resume() }
+            observers = []
+        }
+    }
+    func waitUntilProcessing() async {
+        if continuation != nil { return }
+        await withCheckedContinuation { observers.append($0) }
+    }
+    func finish() { continuation?.resume(returning: result); continuation = nil }
+}
+do {
+    let captureGate = StopGate()
+    let pipelineGate = FirstPipelineGate()
+    let vm = TranscriberViewModel(capture: GatedCapture(gate: captureGate), processor: pipelineGate, meetingStore: .inMemory())
+    let first = await vm.startAsync(title: "First")
+    let firstStop = Task { await vm.stopAsync() }
+    await captureGate.waitUntilStopping()
+    await captureGate.finish()
+    await pipelineGate.waitUntilProcessing()
+    check(!vm.isStopping, "processing releases the capture guard for the next meeting")
+    let second = await vm.startAsync(title: "Second")
+    let secondStop = Task { await vm.stopAsync() }
+    await captureGate.waitUntilStopping()
+    await pipelineGate.finish()
+    await firstStop.value
+    check(vm.isStopping, "finishing an older pipeline cannot clear the newer capture guard")
+    let third = await vm.startAsync(title: "Must wait for second")
+    check(third.id == second.id && vm.meetings.count == 2, "Start remains blocked even after the older pipeline clears active state")
+    await captureGate.finish()
+    await secondStop.value
+    check(vm.meeting(id: first.id)?.status == .summarized && vm.meeting(id: second.id)?.status == .summarized, "both back-to-back meetings finish without losing a session")
+}
 
 // MARK: - Report
 print("\n\(passed) passed, \(failed) failed")

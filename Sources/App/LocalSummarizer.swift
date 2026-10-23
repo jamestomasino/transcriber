@@ -1,5 +1,7 @@
 import Foundation
+#if canImport(FoundationModels)
 import FoundationModels
+#endif
 
 #if canImport(TranscriberCore)
 import TranscriberCore
@@ -24,16 +26,18 @@ import TranscriberCore
 // clear, actionable error on older systems (the app still builds and runs on
 // macOS 14+; the local option is simply unavailable there).
 
-public struct LocalSummaryError: Error, Equatable, Sendable {
+public struct LocalSummaryError: LocalizedError, Equatable, Sendable {
     public let message: String
     public init(_ message: String) { self.message = message }
     public var description: String { message }
+    public var errorDescription: String? { message }
 }
 
 public final class LocalSummarizer: Summarizer, @unchecked Sendable {
     public init() {}
 
     public func summarize(segments: [TranscriptSegment], title: String) async throws -> MeetingSummary {
+        #if canImport(FoundationModels)
         guard #available(macOS 26.0, *) else {
             throw LocalSummaryError(
                 "The local (on-device) summary model needs macOS 26 or later. "
@@ -44,10 +48,9 @@ public final class LocalSummarizer: Summarizer, @unchecked Sendable {
         // Build the prompt exactly like the cloud backends (shared prompt + cap),
         // so the model sees the same instructions and the same JSON contract.
         let rawTranscript = Summary.transcriptText(segments)
-        let prompt = Summary.prompt(
-            title: title,
-            transcript: Summary.fitTranscript(rawTranscript)
-        )
+        var budget = 8_000
+        var fitted = Summary.fitTranscript(rawTranscript, budget: budget)
+        var prompt = Summary.prompt(title: String(title.prefix(200)), transcript: fitted)
 
         let model = SystemLanguageModel()
         guard model.isAvailable else {
@@ -57,18 +60,38 @@ public final class LocalSummarizer: Summarizer, @unchecked Sendable {
             )
         }
 
-        let session = LanguageModelSession(model: model)
-        // `GenerationOptions(temperature:)` keeps the summary focused, matching
-        // the low temperature the cloud backends use.
-        let stream = session.streamResponse(
-            to: FoundationModels.Prompt(prompt),
-            options: FoundationModels.GenerationOptions(temperature: 0.3)
-        )
-        let response = try await stream.collect()
+        // Retry an overflowing request with a smaller view and a fresh session.
+        // Use the original macOS 26 API surface so a 26.0 SDK can still build
+        // this path; newer tokenizer APIs aren't present in every usable SDK.
+        var content: String
+        while true {
+            try Task.checkCancellation()
+            let session = LanguageModelSession(model: model)
+            do {
+                let stream = session.streamResponse(
+                    to: FoundationModels.Prompt(prompt),
+                    options: FoundationModels.GenerationOptions(temperature: 0.3, maximumResponseTokens: 1_024)
+                )
+                content = try await stream.collect().content
+                break
+            } catch LanguageModelSession.GenerationError.exceededContextWindowSize {
+                guard budget > 256 else {
+                    throw LocalSummaryError("This transcript could not fit the local model. Use a cloud summary backend and retry.")
+                }
+                budget /= 2
+                fitted = Summary.fitTranscript(rawTranscript, budget: budget)
+                prompt = Summary.prompt(title: String(title.prefix(200)), transcript: fitted)
+            }
+        }
 
         // Parse through the shared lenient parser so a slightly-off local
         // response still yields a usable summary, and carry the "transcript was
         // capped" caveat exactly like the cloud paths.
-        return Summary.parse(response.content, transcriptWasCapped: !Summary.transcriptFits(rawTranscript))
+        var summary = try Summary.parseResponse(content, transcriptWasCapped: fitted != rawTranscript)
+        summary.model = "Apple Intelligence"
+        return summary
+        #else
+        throw LocalSummaryError("This build does not include Apple Intelligence support. Use OpenAI or Anthropic, or build with a macOS 26 SDK.")
+        #endif
     }
 }

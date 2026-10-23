@@ -12,10 +12,11 @@ import Foundation
 // Swappable for any other provider (AssemblyAI, etc.) behind the same
 // `Transcriber` protocol without touching the rest of the app.
 
-public struct DeepgramError: Error, Equatable, Sendable {
+public struct DeepgramError: LocalizedError, Equatable, Sendable {
     public let message: String
     public init(_ message: String) { self.message = message }
     public var description: String { message }
+    public var errorDescription: String? { message }
 }
 
 public struct DeepgramTranscriber: Transcriber {
@@ -40,32 +41,26 @@ public struct DeepgramTranscriber: Transcriber {
         guard let key = apiKey(), !key.isEmpty else {
             throw DeepgramError("No Deepgram API key set. Add one in Settings → Transcription (cloud).")
         }
-        guard let file = audio.fileURLs.values.first
-            ?? audio.fileURLs[.mic]
-            ?? audio.fileURLs[.system],
+        guard let file = audio.mic ?? audio.system,
               FileManager.default.fileExists(atPath: file.path)
         else {
             return []
         }
 
-        let query = [
-            "model": model,
-            "smart_format": "true",
-            "diarize": "true",
-            "channel_index": "true",
-        ]
-        var q = query.map { "\($0)=\($1)" }.joined(separator: "&")
-        if !language.isEmpty { q += "&language=\(language)" }
-        let endpoint = baseURL.appendingPathComponent("en")
-        guard var comps = URLComponents(url: endpoint, resolvingAgainstBaseURL: false) else {
+        guard var comps = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else {
             throw DeepgramError("Bad API URL.")
         }
-        comps.query = q
+        comps.queryItems = [
+            URLQueryItem(name: "model", value: model),
+            URLQueryItem(name: "smart_format", value: "true"),
+            URLQueryItem(name: "diarize", value: "true"),
+        ]
+        if !language.isEmpty { comps.queryItems?.append(URLQueryItem(name: "language", value: language)) }
         guard let finalURL = comps.url else { throw DeepgramError("Bad API URL.") }
 
         // Deepgram accepts a raw audio body. We send the raw file bytes with
         // the right content type — simplest and widely used.
-        let data = try Data(contentsOf: file)
+        let data = try Data(contentsOf: file, options: .mappedIfSafe)
         let resp = try await http.send(HTTPRequest(
             url: finalURL,
             method: "POST",
@@ -118,17 +113,18 @@ public struct DeepgramTranscriber: Transcriber {
                 }
 
                 for w in words {
-                    let word = (w["word"] as? String) ?? ""
+                    let word = (w["punctuated_word"] as? String) ?? (w["word"] as? String) ?? ""
                     let start = (w["start"] as? Double) ?? 0.0
                     let dur = (w["dur"] as? Double) ?? 0.0
-                    let speaker = (w["speaker"] as? String) ?? "Speaker 1"
+                    let speaker = (w["speaker"] as? Int).map { "Speaker \($0 + 1)" }
+                        ?? (w["speaker"] as? String) ?? "Speaker 1"
                     if speaker != currentSpeaker {
                         flush()
                         currentSpeaker = speaker
                         currentStart = start
                     }
                     currentText.append(word)
-                    currentEnd = start + dur
+                    currentEnd = (w["end"] as? Double) ?? (start + dur)
                 }
                 flush()
             } else if let transcript = alt["transcript"] as? String,

@@ -118,12 +118,19 @@ public struct PipelineProcessor: MeetingProcessor {
         report(ProcessingProgress(stage: .transcribing, fraction: 0))
         let raw = try await transcriber.transcribe(audio: audio, language: language)
 
+        guard raw.contains(where: { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else {
+            throw LLMError("No speech was recognized. Audio was kept; check the sources and language in Settings, then retry.")
+        }
         report(ProcessingProgress(stage: .diarizing, fraction: 0))
         let segments = try await diarizer.diarize(raw)
 
         report(ProcessingProgress(stage: .summarizing, fraction: 0))
         let summary = try await summarizer.summarize(segments: segments, title: meeting.title)
 
+        guard !summary.overall.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              summary.overall != "(no summary produced)" else {
+            throw LLMError("The model returned no summary. Audio was kept so you can retry.")
+        }
         report(ProcessingProgress(stage: .summarizing, fraction: 1))
         return ProcessedResult(segments: segments, summary: summary)
     }
@@ -197,5 +204,70 @@ public struct NoopProcessor: MeetingProcessor {
     ) async throws -> ProcessedResult {
         report(ProcessingProgress(stage: .transcribing, fraction: 0))
         return ProcessedResult(segments: [], summary: MeetingSummary(overall: ""))
+    }
+}
+
+/// Local models have small context windows. Summarize every section in a fresh
+/// session and merge the structured results so the middle of a meeting isn't
+/// silently omitted. The section gists stay in chronological order.
+public struct ChunkingSummarizer: Summarizer {
+    public let inner: any Summarizer
+    public let transcriptBudget: Int
+
+    public init(inner: any Summarizer, transcriptBudget: Int = 6_000) {
+        self.inner = inner
+        self.transcriptBudget = max(256, transcriptBudget)
+    }
+
+    public func summarize(segments: [TranscriptSegment], title: String) async throws -> MeetingSummary {
+        let chunks = Self.chunks(segments, budget: transcriptBudget)
+        var results: [MeetingSummary] = []
+        for chunk in chunks {
+            try Task.checkCancellation()
+            results.append(try await inner.summarize(segments: chunk, title: title))
+        }
+        guard results.count > 1 else {
+            return results.first ?? MeetingSummary(overall: "")
+        }
+        func unique(_ values: [String]) -> [String] {
+            var seen: Set<String> = []
+            return values.filter { seen.insert($0).inserted }
+        }
+        return MeetingSummary(
+            overall: results.enumerated().map { "Part \($0.offset + 1): \($0.element.overall)" }.joined(separator: "\n\n"),
+            keyPoints: unique(results.flatMap(\.keyPoints)),
+            decisions: unique(results.flatMap(\.decisions)),
+            actionItems: unique(results.flatMap(\.actionItems)),
+            model: unique(results.map(\.model)).joined(separator: ", "),
+            transcriptWasCapped: results.contains(where: \.transcriptWasCapped)
+        )
+    }
+
+    public static func chunks(_ segments: [TranscriptSegment], budget: Int) -> [[TranscriptSegment]] {
+        let limit = max(256, budget)
+        var chunks: [[TranscriptSegment]] = []
+        var current: [TranscriptSegment] = []
+        var size = 0
+        for segment in segments {
+            // Bound even unusually large speaker labels, preserving the speech.
+            var segment = segment
+            segment.speaker = String(segment.speaker.prefix(80))
+            let overhead = segment.speaker.count + 3
+            var remaining = segment.text[...]
+            repeat {
+                let part = remaining.prefix(limit - overhead)
+                var piece = segment
+                piece.text = String(part)
+                let cost = overhead + part.count
+                if !current.isEmpty && size + cost > limit {
+                    chunks.append(current); current = []; size = 0
+                }
+                current.append(piece)
+                size += cost
+                remaining = remaining.dropFirst(part.count)
+            } while !remaining.isEmpty
+        }
+        if !current.isEmpty { chunks.append(current) }
+        return chunks
     }
 }

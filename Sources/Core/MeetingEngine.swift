@@ -33,6 +33,7 @@ public final class MeetingEngine {
             var m = m
             if m.status == .recording || m.status == .processing {
                 m.status = .failed
+                m.failureReason = "Transcriber quit before this meeting finished. Retry to process the saved audio."
                 m.lastActivityAt = t
             }
             return m
@@ -73,7 +74,7 @@ public final class MeetingEngine {
         guard !q.isEmpty else { return recent }
         return recent.filter { m in
             m.title.lowercased().contains(q)
-                || m.summary?.overall.lowercased().contains(q) == true
+                || m.summaryText().lowercased().contains(q)
                 || m.transcript.contains { $0.speaker.lowercased().contains(q) }
                 || m.transcript.contains { $0.text.lowercased().contains(q) }
         }
@@ -119,10 +120,11 @@ public final class MeetingEngine {
 
     /// Record the captured audio file URLs for a meeting (a side effect the
     /// view model performs after capture finishes, then hands back here).
-    public func setAudioFiles(id: UUID, files: [AudioSource: URL], now: Date? = nil) {
+    public func setAudioFiles(id: UUID, files: [AudioSource: URL], startOffsets: [AudioSource: TimeInterval] = [:], now: Date? = nil) {
         let t = now ?? clock.now()
         guard let idx = index(of: id) else { return }
         meetings[idx].audioFileURLs = files
+        meetings[idx].audioStartOffsets = startOffsets
         meetings[idx].lastActivityAt = t
     }
 
@@ -140,11 +142,14 @@ public final class MeetingEngine {
     ) {
         let t = now ?? clock.now()
         guard let idx = index(of: id) else { return }
+        var summary = summary
+        if summary.generatedAt == Date(timeIntervalSince1970: 0) { summary.generatedAt = t }
         meetings[idx].summary = summary
         meetings[idx].speakerCount = speakerCount
         if !keepTranscript {
             meetings[idx].transcript = []
         }
+        meetings[idx].failureReason = nil
         meetings[idx].status = .summarized
         meetings[idx].lastActivityAt = t
     }
@@ -158,21 +163,27 @@ public final class MeetingEngine {
         meetings[idx].lastActivityAt = t
     }
 
-    /// Drop the stored audio file URLs from the record (after the view model
-    /// has deleted the files per `RetentionPolicy`). The engine never touches
-    /// the filesystem — this only clears the in-memory record.
-    public func clearAudioFiles(id: UUID, now: Date? = nil) {
-        let t = now ?? clock.now()
+    /// Persist the cleanup decision alongside the summary before deleting any
+    /// source. A crash can then resume that exact decision on the next launch.
+    public func scheduleArtifactDeletion(id: UUID, urls: [URL]) {
         guard let idx = index(of: id) else { return }
-        meetings[idx].audioFileURLs = [:]
-        meetings[idx].lastActivityAt = t
+        meetings[idx].pendingArtifactDeletion = urls
+    }
+
+    public func completeArtifactDeletion(id: UUID) {
+        guard let idx = index(of: id) else { return }
+        let deleted = Set(meetings[idx].pendingArtifactDeletion)
+        meetings[idx].audioFileURLs = meetings[idx].audioFileURLs.filter { !deleted.contains($0.value) }
+        meetings[idx].audioStartOffsets = meetings[idx].audioStartOffsets.filter { meetings[idx].audioFileURLs[$0.key] != nil }
+        meetings[idx].pendingArtifactDeletion = []
     }
 
     /// Record a processing failure. Artifacts are kept so the user can retry.
-    public func fail(id: UUID, now: Date? = nil) {
+    public func fail(id: UUID, reason: String? = nil, now: Date? = nil) {
         let t = now ?? clock.now()
         guard let idx = index(of: id) else { return }
         meetings[idx].status = .failed
+        meetings[idx].failureReason = reason
         meetings[idx].lastActivityAt = t
     }
 

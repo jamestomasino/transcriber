@@ -20,7 +20,9 @@ permissions:
 
 jobs:
   build-sign-notarize:
-    runs-on: macos-15       # needs Xcode/CLT + notarytool
+    runs-on: macos-15       # needs CLT + notarytool
+    env:
+      TRANSCRIBER_BUNDLE_ID: ${{ vars.TRANSCRIBER_BUNDLE_ID || 'local.transcriber' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -58,7 +60,9 @@ jobs:
           TRANSCRIBER_ASC_KEY: ${{ secrets.TRANSCRIBER_ASC_KEY }}
         run: |
           set -euo pipefail
-          KEY_PATH="$(mktemp /tmp/AuthKey.XXXXXX.p8)"
+          KEY_DIR="$(mktemp -d "$RUNNER_TEMP/transcriber-key.XXXXXX")"
+          trap 'rm -rf "$KEY_DIR"' EXIT
+          KEY_PATH="$KEY_DIR/AuthKey.p8"
           printf '%s' "$TRANSCRIBER_ASC_KEY" > "$KEY_PATH"
           chmod 600 "$KEY_PATH"
           export TRANSCRIBER_ASC_KEY_PATH="$KEY_PATH"
@@ -71,7 +75,7 @@ jobs:
           xcrun stapler validate build/Transcriber.app
 
       - name: Package .zip
-        run: cd build && zip -qry Transcriber.zip Transcriber.app
+        run: ditto -c -k --keepParent build/Transcriber.app build/Transcriber.zip
 
       - name: Publish to GitHub Release
         uses: softprops/action-gh-release@v2

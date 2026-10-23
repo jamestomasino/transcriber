@@ -11,10 +11,11 @@ import Foundation
 // This is the "summary" half of the pipeline: the LLM does the summarization,
 // the transcriber (local Speech or cloud) does the speech-to-text + speaker ID.
 
-public struct LLMError: Error, Equatable, Sendable {
+public struct LLMError: LocalizedError, Equatable, Sendable {
     public let message: String
     public init(_ message: String) { self.message = message }
     public var description: String { message }
+    public var errorDescription: String? { message }
 }
 
 // MARK: - OpenAI (chat completions)
@@ -66,7 +67,9 @@ public struct OpenAISummarizer: Summarizer {
         else {
             throw LLMError("Unexpected OpenAI response shape.")
         }
-        return Summary.parse(content, transcriptWasCapped: !Summary.transcriptFits(rawTranscript))
+        var summary = try Summary.parseResponse(content, transcriptWasCapped: !Summary.transcriptFits(rawTranscript))
+        summary.model = model
+        return summary
     }
 }
 
@@ -79,7 +82,7 @@ public struct AnthropicSummarizer: Summarizer {
     public let baseURL: URL
 
     public init(
-        model: String = "claude-3-5-haiku-latest",
+        model: String = "claude-haiku-4-5",
         apiKey: @escaping () -> String?,
         http: any HTTPClient,
         baseURL: URL = URL(string: "https://api.anthropic.com/v1")!

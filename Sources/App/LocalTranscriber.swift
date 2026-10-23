@@ -1,42 +1,36 @@
 import Foundation
 import Speech
 
-// MARK: - Local transcriber (Apple Speech)
-//
-// The private, on-device path. Uses `SFSpeechURLRecognitionRequest` on the
-// recorded audio file — no model download (the on-device model ships with the
-// OS), no API key, no network. Returns segments with approximate timestamps
-// (the URL API gives a single final result; we split on final/partial
-// boundaries). Speaker ID is NOT done here — the pipeline's `HeuristicDiarizer`
-// assigns "Speaker N" labels afterward. This is the documented trade-off: local
-// is private but best-effort on speakers; cloud is accurate on speakers.
-//
-// Lives in the App layer because it imports `Speech` (Core stays pure).
+#if canImport(TranscriberCore)
+import TranscriberCore
+#endif
 
-public struct SpeechError: Error, Equatable, Sendable {
+// Apple Speech is strictly on-device. Never fall back to sending local audio
+// to Apple's servers when the requested language model is unavailable.
+
+public struct SpeechError: LocalizedError, Equatable, Sendable {
     public let message: String
     public init(_ message: String) { self.message = message }
     public var description: String { message }
+    public var errorDescription: String? { message }
 }
 
 public final class LocalSpeechTranscriber: Transcriber, @unchecked Sendable {
     public init() {}
 
     public func transcribe(audio: CapturedAudio, language: String) async throws -> [TranscriptSegment] {
-        // Pick the first recorded file to transcribe. (A multi-source mix would
-        // be a single merged file in a future phase; for now each source is its
-        // own file and we transcribe the mic, or the first available.)
-        guard let file = audio.fileURLs.values.first
-            ?? audio.fileURLs[.mic]
-            ?? audio.fileURLs[.system],
-              FileManager.default.fileExists(atPath: file.path)
-        else {
-            return [] // Nothing captured → empty transcript, not an error.
+        guard let file = audio.mic ?? audio.system,
+              FileManager.default.fileExists(atPath: file.path) else {
+            throw SpeechError("No recorded audio is available. Start a new meeting.")
         }
-
-        let status = SFSpeechRecognizer.authorizationStatus()
+        var status = SFSpeechRecognizer.authorizationStatus()
+        if status == .notDetermined {
+            status = await withCheckedContinuation { continuation in
+                SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0) }
+            }
+        }
         guard status == .authorized else {
-            throw SpeechError("Microphone/Speech access not authorized. Enable it in System Settings → Privacy & Security → Speech Recognition.")
+            throw SpeechError("Speech access is off. Enable Transcriber in System Settings → Privacy & Security → Speech Recognition, then retry.")
         }
 
         let locale = language.isEmpty ? Locale.autoupdatingCurrent : Locale(identifier: language)
@@ -45,47 +39,75 @@ public final class LocalSpeechTranscriber: Transcriber, @unchecked Sendable {
             throw SpeechError("Speech recognizer unavailable for that language.")
         }
 
+        guard recognizer.supportsOnDeviceRecognition else {
+            throw SpeechError("On-device speech recognition is unavailable for this language. Choose another language or use Deepgram in Settings.")
+        }
         let request = SFSpeechURLRecognitionRequest(url: file)
         request.shouldReportPartialResults = false
-        // On-device only (private). Fall back to server if on-device unsupported.
+        request.requiresOnDeviceRecognition = true
         request.addsPunctuation = true
 
-        let result = try await withCheckedThrowingContinuation { (cont: CheckedContinuation<SFSpeechRecognitionResult, Error>) in
-            recognizer.recognitionTask(with: request) { res, err in
-                if let res {
-                    cont.resume(returning: res)
-                } else {
-                    cont.resume(throwing: err ?? SpeechError("Speech recognition failed."))
+        // Speech can deliver more than one callback even when partial results
+        // are disabled. Hold the task and resume the continuation exactly once.
+        let state = SpeechRecognitionState()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                state.begin(continuation)
+                let task = recognizer.recognitionTask(with: request) { result, error in
+                    if let result, result.isFinal {
+                        let segments = result.bestTranscription.segments.map { word in
+                            TranscriptSegment(speaker: "Speaker 1", text: word.substring,
+                                              startOffset: word.timestamp,
+                                              endOffset: word.timestamp + word.duration)
+                        }
+                        state.finish(.success(TranscriptSegment.utterances(from: segments)))
+                    } else if let error {
+                        state.finish(.failure(error))
+                    }
                 }
+                state.setTask(task)
             }
-        }
-        return Self.segments(from: result)
-    }
-
-    /// Convert a final speech result into segments. The URL API yields a single
-    /// result with best-transcription; we split it into line segments with
-    /// evenly-spaced offsets as a rough timing (the heuristic diarizer then
-    /// groups them). This is an approximation — accurate per-word timing and
-    /// speaker labels come from the cloud path.
-    private static func segments(from result: SFSpeechRecognitionResult) -> [TranscriptSegment] {
-        let text = result.bestTranscription.formattedString
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
-
-        // Split on sentence-ish boundaries to get multiple segments.
-        let lines = text
-            .components(separatedBy: CharacterSet.newlines)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
-        let parts = lines.isEmpty ? [text] : lines
-
-        // Evenly distribute a rough 1s per segment as a placeholder offset.
-        return parts.enumerated().map { i, line in
-            TranscriptSegment(
-                speaker: "Speaker 1", // overwritten by the diarizer
-                text: line,
-                startOffset: TimeInterval(i),
-                endOffset: TimeInterval(i + 1)
-            )
+        } onCancel: {
+            state.cancel()
         }
     }
+}
+
+private final class SpeechRecognitionState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<[TranscriptSegment], Error>?
+    private var task: SFSpeechRecognitionTask?
+    private var finished = false
+
+    func begin(_ continuation: CheckedContinuation<[TranscriptSegment], Error>) {
+        lock.lock()
+        if finished {
+            lock.unlock()
+            continuation.resume(throwing: CancellationError())
+        } else {
+            self.continuation = continuation
+            lock.unlock()
+        }
+    }
+
+    func setTask(_ task: SFSpeechRecognitionTask) {
+        lock.lock()
+        if finished { lock.unlock(); task.cancel() }
+        else { self.task = task; lock.unlock() }
+    }
+
+    func finish(_ result: Result<[TranscriptSegment], Error>) {
+        lock.lock()
+        guard !finished else { lock.unlock(); return }
+        finished = true
+        let continuation = self.continuation
+        let task = self.task
+        self.continuation = nil
+        self.task = nil
+        lock.unlock()
+        continuation?.resume(with: result)
+        task?.cancel()
+    }
+
+    func cancel() { finish(.failure(CancellationError())) }
 }

@@ -8,7 +8,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 APP_NAME="Transcriber"
-BUNDLE_ID="local.transcriber"
+BUNDLE_ID="${TRANSCRIBER_BUNDLE_ID:-local.transcriber}"
 MIN_MACOS="14.0"
 # Build for the host architecture (Apple Silicon or Intel) rather than hardcoding arm64.
 ARCH="$(uname -m)"
@@ -39,6 +39,9 @@ APP_SRC=(
   Sources/App/SettingsView.swift
   Sources/App/RealAudioCapture.swift
   Sources/App/HTTPClient.swift
+  Sources/App/AudioDevices.swift
+  Sources/App/AudioPreparation.swift
+  Sources/App/OnboardingView.swift
   Sources/App/LocalTranscriber.swift
   Sources/App/LocalSummarizer.swift
   Sources/App/ProcessorFactory.swift
@@ -107,6 +110,8 @@ if ! build_app_with_sdk "$DEFAULT_SDK"; then
   fi
 fi
 
+printf '%s\n' "${WORKING_SDK:-$DEFAULT_SDK}" > "${BUILD}/sdk-path"
+
 echo "==> Writing Info.plist"
 cat > "${APP_DIR}/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -124,6 +129,7 @@ cat > "${APP_DIR}/Contents/Info.plist" <<PLIST
     <key>NSHighResolutionCapable</key> <true/>
     <key>NSPrincipalClass</key>        <string>NSApplication</string>
     <key>LSApplicationCategoryType</key> <string>public.app-category.productivity</string>
+    <key>NSSpeechRecognitionUsageDescription</key> <string>Transcriber uses on-device speech recognition to turn meeting audio into text.</string>
     <key>NSMicrophoneUsageDescription</key> <string>Transcriber records your microphone so it can transcribe what you say during a meeting.</string>
 </dict>
 </plist>
@@ -140,7 +146,7 @@ sign_app() {
   local app="$1"
   if [ -n "${TRANSCRIBER_SIGN_IDENTITY:-}" ]; then
     echo "==> Code signing with: ${TRANSCRIBER_SIGN_IDENTITY} (hardened runtime)"
-    codesign --force --deep --options runtime --sign "${TRANSCRIBER_SIGN_IDENTITY}" "${app}"
+    codesign --force --deep --options runtime --entitlements Resources/Transcriber.entitlements --sign "${TRANSCRIBER_SIGN_IDENTITY}" "${app}"
   else
     echo "==> Ad-hoc code signing (runs only on this machine; set TRANSCRIBER_SIGN_IDENTITY to distribute)"
     codesign --force --deep --sign - "${app}" 2>/dev/null || \
@@ -152,27 +158,36 @@ sign_app() {
 # to have been used (hardened runtime) and one notarization credential set.
 notarize_app() {
   local app="$1"
-  local zip; zip="$(mktemp /tmp/transcriber.XXXXXX).zip"
-  ( cd "$(dirname "${app}")" && zip -qX "${zip}" "$(basename "${app}")" )
-  echo "==> Notarizing $(basename "${app}") …"
+  local staging zip result=0
+  local credentials=()
   if [ -n "${TRANSCRIBER_ASC_KEY_PATH:-}" ]; then
-    xcrun notarytool submit "${zip}" \
-      --key "${TRANSCRIBER_ASC_KEY_PATH}" \
-      --key-id "${TRANSCRIBER_ASC_KEY_ID:?TRANSCRIBER_ASC_KEY_ID required}" \
-      --issuer "${TRANSCRIBER_ASC_ISSUER:?TRANSCRIBER_ASC_ISSUER required}" \
-      --wait
+    credentials=(--key "${TRANSCRIBER_ASC_KEY_PATH}"
+      --key-id "${TRANSCRIBER_ASC_KEY_ID:?TRANSCRIBER_ASC_KEY_ID required}"
+      --issuer "${TRANSCRIBER_ASC_ISSUER:?TRANSCRIBER_ASC_ISSUER required}")
   elif [ -n "${TRANSCRIBER_APPLE_ID:-}" ]; then
-    xcrun notarytool submit "${zip}" \
-      --username "${TRANSCRIBER_APPLE_ID}" \
-      --password "${TRANSCRIBER_APPLE_PW:?TRANSCRIBER_APPLE_PW required}" \
-      --wait
+    credentials=(--apple-id "${TRANSCRIBER_APPLE_ID}"
+      --team-id "${TRANSCRIBER_TEAM_ID:?TRANSCRIBER_TEAM_ID required}"
+      --password "${TRANSCRIBER_APPLE_PW:?TRANSCRIBER_APPLE_PW required}")
   else
     echo "    ERROR: no notarization credentials. Set TRANSCRIBER_ASC_* or TRANSCRIBER_APPLE_ID." >&2
-    rm -f "${zip}"; return 1
+    return 1
   fi
-  echo "==> Stapling ticket"
-  xcrun stapler staple "${app}"
-  rm -f "${zip}"
+  staging="$(mktemp -d /tmp/transcriber-notary.XXXXXX)"
+  zip="${staging}/Transcriber.zip"
+  # A recursive archive is essential: zipping only the directory entry sends
+  # Apple an empty app. ditto also preserves bundle metadata and symlinks.
+  if ditto -c -k --keepParent "$app" "$zip"; then
+    echo "==> Notarizing $(basename "${app}") …"
+    xcrun notarytool submit "$zip" "${credentials[@]}" --wait || result=$?
+    if [ "$result" -eq 0 ]; then
+      echo "==> Stapling ticket"
+      xcrun stapler staple "$app" || result=$?
+    fi
+  else
+    result=$?
+  fi
+  rm -rf "$staging"
+  return "$result"
 }
 
 sign_app "${APP_DIR}"
@@ -193,6 +208,11 @@ if [ "$MODE" = "test" ]; then
     "${CORE_SRC[@]}" "${TEST_SRC[@]}"
   echo "==> Running test executable"
   "${BUILD}/tests"
+  echo "==> Building + running media checks"
+  swiftc -parse-as-library -target "$TARGET" -sdk "${WORKING_SDK:-$DEFAULT_SDK}" \
+    -o "${BUILD}/app-checks" "${CORE_SRC[@]}" \
+    Sources/App/AudioPreparation.swift Sources/App/LocalTranscriber.swift Validation/AppChecks.swift
+  "${BUILD}/app-checks"
   echo
   echo "    Tests: ${BUILD}/tests"
 fi

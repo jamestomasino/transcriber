@@ -40,6 +40,27 @@ public struct TranscriptSegment: Codable, Equatable, Sendable {
     }
 }
 
+public extension TranscriptSegment {
+    /// Turn word timestamps into readable utterances without erasing the
+    /// pauses used by the local diarizer to estimate speaker changes.
+    static func utterances(from words: [TranscriptSegment]) -> [TranscriptSegment] {
+        var result: [TranscriptSegment] = []
+        for word in words.sorted(by: { $0.startOffset < $1.startOffset }) {
+            guard let previous = result.last,
+                  previous.speaker == word.speaker,
+                  word.startOffset - previous.endOffset <= 1.5,
+                  previous.text.count + word.text.count < 600,
+                  !previous.text.hasSuffix("."), !previous.text.hasSuffix("?"), !previous.text.hasSuffix("!") else {
+                result.append(word)
+                continue
+            }
+            result[result.count - 1].text += " " + word.text
+            result[result.count - 1].endOffset = max(previous.endOffset, word.endOffset)
+        }
+        return result
+    }
+}
+
 /// The structured summary of a meeting — the only artifact we keep by default.
 public struct MeetingSummary: Codable, Equatable, Sendable {
     public var overall: String
@@ -106,11 +127,14 @@ public struct Meeting: Codable, Equatable, Identifiable, Sendable {
 
     // Transient until summarized (cleared after a successful summary).
     public var audioFileURLs: [AudioSource: URL]
+    public var audioStartOffsets: [AudioSource: TimeInterval]
     public var transcript: [TranscriptSegment]
     public var speakerCount: Int
 
     // Retained.
     public var summary: MeetingSummary?
+    public var failureReason: String?
+    public var pendingArtifactDeletion: [URL]
 
     public init(
         id: UUID = UUID(),
@@ -122,9 +146,12 @@ public struct Meeting: Codable, Equatable, Identifiable, Sendable {
         createdAt: Date,
         lastActivityAt: Date,
         audioFileURLs: [AudioSource: URL] = [:],
+        audioStartOffsets: [AudioSource: TimeInterval] = [:],
         transcript: [TranscriptSegment] = [],
         speakerCount: Int = 0,
-        summary: MeetingSummary? = nil
+        summary: MeetingSummary? = nil,
+        failureReason: String? = nil,
+        pendingArtifactDeletion: [URL] = []
     ) {
         self.id = id
         self.title = title
@@ -135,9 +162,36 @@ public struct Meeting: Codable, Equatable, Identifiable, Sendable {
         self.createdAt = createdAt
         self.lastActivityAt = lastActivityAt
         self.audioFileURLs = audioFileURLs
+        self.audioStartOffsets = audioStartOffsets
         self.transcript = transcript
         self.speakerCount = speakerCount
         self.summary = summary
+        self.failureReason = failureReason
+        self.pendingArtifactDeletion = pendingArtifactDeletion
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, title, status, startedAt, stoppedAt, duration, createdAt, lastActivityAt
+        case audioFileURLs, audioStartOffsets, transcript, speakerCount, summary, failureReason, pendingArtifactDeletion
+    }
+
+    public init(from decoder: Decoder) throws {
+        let d = try decoder.container(keyedBy: CodingKeys.self)
+        id = try d.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        title = try d.decodeIfPresent(String.self, forKey: .title) ?? "Meeting"
+        status = try d.decodeIfPresent(MeetingStatus.self, forKey: .status) ?? .failed
+        startedAt = try d.decodeIfPresent(Date.self, forKey: .startedAt) ?? Date(timeIntervalSince1970: 0)
+        stoppedAt = try d.decodeIfPresent(Date.self, forKey: .stoppedAt)
+        duration = try d.decodeIfPresent(TimeInterval.self, forKey: .duration) ?? 0
+        createdAt = try d.decodeIfPresent(Date.self, forKey: .createdAt) ?? startedAt
+        lastActivityAt = try d.decodeIfPresent(Date.self, forKey: .lastActivityAt) ?? startedAt
+        audioFileURLs = try d.decodeIfPresent([AudioSource: URL].self, forKey: .audioFileURLs) ?? [:]
+        audioStartOffsets = try d.decodeIfPresent([AudioSource: TimeInterval].self, forKey: .audioStartOffsets) ?? [:]
+        transcript = try d.decodeIfPresent([TranscriptSegment].self, forKey: .transcript) ?? []
+        speakerCount = try d.decodeIfPresent(Int.self, forKey: .speakerCount) ?? 0
+        summary = try d.decodeIfPresent(MeetingSummary.self, forKey: .summary)
+        failureReason = try d.decodeIfPresent(String.self, forKey: .failureReason)
+        pendingArtifactDeletion = try d.decodeIfPresent([URL].self, forKey: .pendingArtifactDeletion) ?? []
     }
 }
 

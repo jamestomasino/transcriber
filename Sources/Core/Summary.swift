@@ -115,6 +115,18 @@ public enum Summary {
         )
     }
 
+    /// Reject empty or truncated structured output before retention can run.
+    /// Plain-text responses remain supported as the documented fallback.
+    public static func parseResponse(_ raw: String, transcriptWasCapped: Bool = false) throws -> MeetingSummary {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let summary = parse(raw, transcriptWasCapped: transcriptWasCapped)
+        guard !trimmed.isEmpty, !summary.overall.isEmpty,
+              !(summary.overall == trimmed && (trimmed.hasPrefix("{") || trimmed.hasPrefix("```"))) else {
+            throw LLMError("The model returned an empty or incomplete summary. Audio was kept; retry or choose another model.")
+        }
+        return summary
+    }
+
     /// Find the first balanced top-level JSON object in `text`. Returns it as a
     /// string, or nil. Handles ```json fences and leading/trailing prose.
     private static func extractJSONObject(in text: String) -> String? {

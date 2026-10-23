@@ -18,6 +18,7 @@ public final class MeetingStore: @unchecked Sendable {
     private let url: URL
     private let lock = NSLock()
     private var cache: [Meeting]?
+    private var memoryOnly = false
 
     public init(url: URL) {
         self.url = url
@@ -29,6 +30,7 @@ public final class MeetingStore: @unchecked Sendable {
         let s = MeetingStore(url: FileManager.default.temporaryDirectory
             .appendingPathComponent("transcriber-meetings-\(UUID().uuidString).json"))
         s.cache = initial
+        s.memoryOnly = true
         return s
     }
 
@@ -40,14 +42,14 @@ public final class MeetingStore: @unchecked Sendable {
     /// `SettingsStore.load()`.
     public func load() -> [Meeting] {
         if let c = cache { return c }
-        guard let data = try? Data(contentsOf: url) else { return [] }
-        do {
-            let ms = try JSONDecoder().decode([Meeting].self, from: data)
-            cache = ms
-            return ms
-        } catch {
-            return []
+        for candidate in [url, url.appendingPathExtension("bak")] {
+            if let data = try? Data(contentsOf: candidate),
+               let meetings = try? JSONDecoder().decode([Meeting].self, from: data) {
+                cache = meetings
+                return meetings
+            }
         }
+        return []
     }
 
     /// Persist the full collection atomically. The collection is the single
@@ -59,22 +61,26 @@ public final class MeetingStore: @unchecked Sendable {
     /// the user's irreplaceable data, so the previous good copy is kept).
     /// If the new write fails, the old file is left untouched (atomic write),
     /// and the `.bak` from the prior save is still available to recover from.
-    public func save(_ meetings: [Meeting]) {
+    @discardableResult
+    public func save(_ meetings: [Meeting], sanitizeBackup: Bool = false) -> Bool {
         lock.lock()
-        cache = meetings
-        lock.unlock()
-        let data = (try? JSONEncoder().encode(meetings)) ?? Data()
-        // Rotate: keep a backup of the file as it is *now* (if any).
-        if FileManager.default.fileExists(atPath: url.path) {
-            let bak = url.appendingPathExtension("bak")
-            try? FileManager.default.removeItem(at: bak)
-            try? FileManager.default.copyItem(at: url, to: bak)
-        }
-        // Atomic write: a crash mid-write can't corrupt the live file.
+        defer { lock.unlock() }
+        if memoryOnly { cache = meetings; return true }
         do {
+            let data = try JSONEncoder().encode(meetings)
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            // Never overwrite the recovery copy with corrupt live data.
+            if sanitizeBackup {
+                try data.write(to: url.appendingPathExtension("bak"), options: .atomic)
+            } else if let old = try? Data(contentsOf: url),
+                      (try? JSONDecoder().decode([Meeting].self, from: old)) != nil {
+                try old.write(to: url.appendingPathExtension("bak"), options: .atomic)
+            }
             try data.write(to: url, options: .atomic)
+            cache = meetings
+            return true
         } catch {
-            // The live file is unchanged (atomic); the .bak is the fallback.
+            return false
         }
     }
 }

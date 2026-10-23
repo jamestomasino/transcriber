@@ -7,10 +7,15 @@ import Foundation
 // `inMemory()` seam so tests never touch the user's real settings.json.
 //
 // The two decisions that drive the pipeline:
-//   - `transcriptionBackend`: local (Apple Speech, private, no model download)
+//   - `transcriptionBackend`: local (Apple Speech, on-device, private, no key)
 //     or cloud (Deepgram, best speaker ID, needs an API key in the Keychain).
-//   - `whisperModel`: which whisper.cpp size to download on demand (only used
-//     by the optional whisper path; the local Speech path needs no model).
+//   - `summaryBackend`: local (on-device Apple Intelligence), OpenAI, or
+//     Anthropic.
+//
+// `whisperModel` is a reserved field from an earlier design (an optional
+// whisper.cpp transcriber) that the current app does not use — the local path
+// is Apple Speech, which needs no model. It is kept (and lenient-decoded) so
+// settings.json files written by older builds still load.
 
 /// Where transcription + speaker ID happens.
 public enum TranscriptionBackend: String, Codable, CaseIterable, Sendable {
@@ -92,6 +97,14 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.notifyOnSummary = notifyOnSummary
     }
 
+    public static func defaultSummaryModel(for backend: SummaryBackend) -> String {
+        switch backend {
+        case .local: return ""
+        case .openai: return "gpt-4o-mini"
+        case .anthropic: return "claude-haiku-4-5"
+        }
+    }
+
     /// The sources to capture, derived from the toggles.
     public var requestedSources: Set<AudioSource> {
         var s: Set<AudioSource> = []
@@ -141,6 +154,7 @@ public final class SettingsStore: @unchecked Sendable {
     private let url: URL
     private let lock = NSLock()
     private var cache: AppSettings?
+    private var memoryOnly = false
 
     public init(url: URL) {
         self.url = url
@@ -151,6 +165,7 @@ public final class SettingsStore: @unchecked Sendable {
         let s = SettingsStore(url: FileManager.default.temporaryDirectory
             .appendingPathComponent("transcriber-settings-\(UUID().uuidString).json"))
         s.cache = initial
+        s.memoryOnly = true
         return s
     }
 
@@ -168,6 +183,8 @@ public final class SettingsStore: @unchecked Sendable {
 
     public func save(_ s: AppSettings) {
         cache = s
+        guard !memoryOnly else { return }
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         let data = (try? JSONEncoder().encode(s)) ?? Data()
         try? data.write(to: url, options: .atomic)
     }
@@ -257,6 +274,11 @@ public struct RetentionPolicy: Sendable {
     /// The on-disk artifacts to delete after a successful summary.
     public func artifactsToDelete(for meeting: Meeting) -> [URL] {
         var urls: [URL] = []
+        // A prepared mix is always transient, even when original audio is kept.
+        // This also covers a crash before the transcriber's local cleanup ran.
+        if let directory = meeting.audioFileURLs.values.first?.deletingLastPathComponent() {
+            urls.append(directory.appendingPathComponent(CapturedAudio.preparedFileName))
+        }
         if !settings.keepAudioAfterSummary {
             urls.append(contentsOf: meeting.audioFileURLs.values)
         }

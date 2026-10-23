@@ -32,10 +32,19 @@ Guidance for agents (and humans) working in this repo.
 
 ## Conventions
 
-- Persistence layers (to be added) should be small and swappable; the view model
-  never touches the file system directly. Keep an `inMemory()` seam for tests so
+- Persistence layers should stay small and swappable; the view model
+  never touches the file system directly (use MeetingArtifactManaging for cleanup). Keep an `inMemory()` seam for tests so
   the test suite never reads/writes the user's real files.
 - Prefer fixing problems over surfacing them; validate end-to-end (the app should
   actually launch and run, not just compile and pass tests).
 - Read `PLAN.md` before making non-trivial changes — it records the intended
   architecture, the phased roadmap, and the open product decisions.
+
+- API keys live only in Keychain. Never log, serialize, or bundle them.
+- Run `bash build.sh test` for Core assertions and actual media preparation
+  checks. `Validation/run.sh` adds optional live checks and isolated UI fixtures;
+  a skipped permission check is not a passing end-to-end recording test.
+- Keep the test recordings root isolated for the entire harness. Resetting it to
+  the real default can sweep or write the user's recordings from a unit test.
+- Persist summaries and pending cleanup decisions before removing source files.
+  Prepared mixes are always transient, including when original audio is kept.

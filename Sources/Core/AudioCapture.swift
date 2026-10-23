@@ -16,11 +16,14 @@ import Foundation
 /// The result of a capture session: the on-disk file(s) produced, keyed by
 /// source. A source is absent if it was not requested or failed to start.
 public struct CapturedAudio: Equatable, Sendable {
+    public static let preparedFileName = "mixed.m4a"
     /// File URLs per source that actually captured something.
     public var fileURLs: [AudioSource: URL]
+    public var startOffsets: [AudioSource: TimeInterval]
 
-    public init(fileURLs: [AudioSource: URL] = [:]) {
+    public init(fileURLs: [AudioSource: URL] = [:], startOffsets: [AudioSource: TimeInterval] = [:]) {
         self.fileURLs = fileURLs
+        self.startOffsets = startOffsets
     }
 
     /// The microphone file, if captured.
@@ -122,8 +125,14 @@ public enum RecordingsDirectory {
 
 /// A running capture session.
 public protocol AudioCaptureSession: Sendable {
+    /// File references persisted while recording, so a crash remains retryable.
+    var audio: CapturedAudio { get }
     /// Stop capturing and finalize the files.
     func stop() async throws -> CapturedAudio
+}
+
+public extension AudioCaptureSession {
+    var audio: CapturedAudio { CapturedAudio() }
 }
 
 // MARK: - Storage directory (Core, pure)
@@ -290,5 +299,45 @@ private final class RecordingSession: AudioCaptureSession, @unchecked Sendable {
         u32(UInt32(dataBytes))
         d.append(contentsOf: Data(count: dataBytes)) // silence
         try d.write(to: url)
+    }
+}
+
+
+/// Small persistence seam for the transient artifacts. The view model asks for
+/// cleanup without accessing the filesystem; tests can inject a failing store.
+public protocol MeetingArtifactManaging: Sendable {
+    func sweep(liveIDs: Set<UUID>) -> [URL]
+    func remove(_ urls: [URL]) throws
+    func removeEmptyDirectory(for id: UUID) throws
+    func discard(_ meeting: Meeting) throws
+}
+
+public struct MeetingArtifacts: MeetingArtifactManaging {
+    public init() {}
+
+    public func sweep(liveIDs: Set<UUID>) -> [URL] {
+        RecordingsDirectory.orphanDirectories(liveIDs: liveIDs).filter {
+            do { try FileManager.default.removeItem(at: $0); return true }
+            catch { return false }
+        }
+    }
+
+    public func remove(_ urls: [URL]) throws {
+        for url in urls {
+            do { try FileManager.default.removeItem(at: url) }
+            catch let error as CocoaError where error.code == .fileNoSuchFile { continue }
+        }
+    }
+
+    public func removeEmptyDirectory(for id: UUID) throws {
+        let dir = RecordingsDirectory.forMeeting(id)
+        guard FileManager.default.fileExists(atPath: dir.path) else { return }
+        let contents = try FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)
+        if contents.isEmpty { try FileManager.default.removeItem(at: dir) }
+    }
+
+    public func discard(_ meeting: Meeting) throws {
+        try remove(RetentionPolicy(settings: AppSettings()).artifactsToDelete(for: meeting))
+        try remove([RecordingsDirectory.forMeeting(meeting.id)])
     }
 }

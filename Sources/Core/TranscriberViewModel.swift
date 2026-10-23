@@ -24,16 +24,22 @@ import TranscriberCore
 public final class TranscriberViewModel: ObservableObject {
     @Published public private(set) var meetings: [Meeting] = []
     @Published public private(set) var activeMeeting: Meeting?
+    @Published public private(set) var isStarting = false
+    @Published public private(set) var isStopping = false
+    @Published public private(set) var toastMessage: String?
+    private var toastTask: Task<Void, Never>?
     @Published public private(set) var levels: [AudioSource: Float] = [:]
     @Published public private(set) var captureStatus: [AudioSource: AudioCaptureError] = [:]
     /// The pipeline stage currently running (for the detail view's progress
     /// bar). nil when not processing.
     @Published public private(set) var processingProgress: ProcessingProgress?
+    @Published public private(set) var progressByMeeting: [UUID: ProcessingProgress] = [:]
     /// A human-readable processing error, when the last pipeline run failed.
     @Published public private(set) var processingError: String?
 
     private let engine: MeetingEngine
     private let capture: AudioCapture
+    private let artifacts: any MeetingArtifactManaging
     /// The post-stop pipeline (transcribe → diarize → summarize). Injected so
     /// tests can use a `FakeProcessor` and the app can supply a real backend.
     /// Defaults to `NoopProcessor` (does nothing) so the start/stop flow works
@@ -68,6 +74,7 @@ public final class TranscriberViewModel: ObservableObject {
     private var sessionMeetingID: UUID?
     /// Guards against concurrent pipeline runs for the same meeting.
     private var processingIDs: Set<UUID> = []
+    private var processingTasks: [UUID: Task<ProcessedResult, Error>] = [:]
 
     public init(
         engine: MeetingEngine = MeetingEngine(),
@@ -77,10 +84,12 @@ public final class TranscriberViewModel: ObservableObject {
         settingsStore: SettingsStore? = nil,
         meetingStore: MeetingStore? = nil,
         processorFactory: ((AppSettings) -> any MeetingProcessor)? = nil,
-        notifier: ((MeetingNotification) -> Void)? = nil
+        notifier: ((MeetingNotification) -> Void)? = nil,
+        artifacts: any MeetingArtifactManaging = MeetingArtifacts()
     ) {
         self.engine = engine
         self.capture = capture
+        self.artifacts = artifacts
         self.processor = processor
         self.processorFactory = processorFactory
         self.notifier = notifier
@@ -100,6 +109,12 @@ public final class TranscriberViewModel: ObservableObject {
         // idempotent and safe — it only touches UUID-named dirs that aren't a
         // live meeting's (or are a live meeting's but already empty).
         self.sweepOrphanRecordings()
+        // Resume a cleanup interrupted after the summary was safely saved.
+        for meeting in engine.stored where meeting.summary != nil && !meeting.pendingArtifactDeletion.isEmpty {
+            finishPendingRetention(meeting)
+        }
+        self.meetings = engine.recent
+        self.activeMeeting = engine.active
     }
 
     /// Remove per-meeting recording directories that no longer correspond to a
@@ -109,17 +124,16 @@ public final class TranscriberViewModel: ObservableObject {
     @discardableResult
     public func sweepOrphanRecordings() -> [URL] {
         let liveIDs = Set(engine.stored.map(\.id))
-        let orphans = RecordingsDirectory.orphanDirectories(liveIDs: liveIDs)
-        for url in orphans { try? FileManager.default.removeItem(at: url) }
-        return orphans
+        return artifacts.sweep(liveIDs: liveIDs)
     }
 
     // MARK: - Persistence
 
     /// Persist the engine's current collection to disk (a no-op when no store
     /// is wired). Called after every mutation that should survive a relaunch.
-    private func persist() {
-        meetingStore?.save(engine.stored)
+    @discardableResult
+    private func persist() -> Bool {
+        meetingStore?.save(engine.stored) ?? true
     }
 
     // MARK: - Derived
@@ -151,21 +165,41 @@ public final class TranscriberViewModel: ObservableObject {
 
     /// Begin a meeting and its capture. Awaitable so tests can drive it.
     @discardableResult
-    public func startAsync(title: String?, sources: Set<AudioSource> = [.mic, .system]) async -> Meeting {
+    public func startAsync(title: String?, sources: Set<AudioSource>? = nil) async -> Meeting {
+        // Starting twice while a permission prompt is open must not orphan a session.
+        if isStopping, let id = sessionMeetingID, let stopping = engine.meeting(id: id) { return stopping }
+        if let activeMeeting, isRecording || isStarting { return activeMeeting }
+        isStarting = true
+        defer { isStarting = false }
+        let sources = sources ?? settings.requestedSources
         let meeting = engine.start(title: title)
         activeMeeting = meeting
         meetings = engine.recent
 
+        processingError = nil
+        guard persist() else {
+            processingError = "The meeting could not be saved. Check the data folder’s permissions before recording."
+            engine.fail(id: meeting.id, reason: processingError)
+            meetings = engine.recent
+            activeMeeting = engine.active
+            notifyTerminal(id: meeting.id, errorDescription: processingError)
+            return meeting
+        }
         do {
+            guard !sources.isEmpty else {
+                throw AudioCaptureError.sourceFailed(source: .mic, detail: "Choose at least one audio source in Settings → Audio.")
+            }
             let dir = RecordingsDirectory.forMeeting(meeting.id)
             let s = try await capture.start(sources: sources, directory: dir)
             self.session = s
             self.sessionMeetingID = meeting.id
+            self.engine.setAudioFiles(id: meeting.id, files: s.audio.fileURLs, startOffsets: s.audio.startOffsets)
         } catch {
+            processingError = (error as? AudioCaptureError)?.description ?? error.localizedDescription
             // Capture failed outright (e.g. no permission on any source).
             if let active = self.engine.active, active.id == meeting.id {
                 // Nothing was recorded — fail the meeting so the user sees why.
-                self.engine.fail(id: meeting.id)
+                self.engine.fail(id: meeting.id, reason: processingError)
                 self.activeMeeting = self.engine.meeting(id: meeting.id)
                 self.meetings = self.engine.recent
             }
@@ -178,11 +212,14 @@ public final class TranscriberViewModel: ObservableObject {
         // Persist the new meeting (recording, or failed if capture failed)
         // so it survives a relaunch.
         self.persist()
+        if engine.meeting(id: meeting.id)?.status == .failed {
+            notifyTerminal(id: meeting.id, errorDescription: processingError)
+        }
         return meeting
     }
 
     /// UI-facing: start a meeting (returns immediately; capture runs async).
-    public func start(title: String?, sources: Set<AudioSource> = [.mic, .system]) {
+    public func start(title: String?, sources: Set<AudioSource>? = nil) {
         Task { _ = await self.startAsync(title: title, sources: sources) }
     }
 
@@ -192,7 +229,8 @@ public final class TranscriberViewModel: ObservableObject {
 
     /// Stop the active meeting, finalize its audio, and run the pipeline.
     public func stopAsync() async {
-        guard let meeting = activeMeeting, meeting.status == .recording else { return }
+        guard !isStarting, !isStopping, let meeting = activeMeeting, meeting.status == .recording else { return }
+        isStopping = true
         let id = meeting.id
         engine.stop(id: id)
         activeMeeting = engine.meeting(id: id)
@@ -202,10 +240,17 @@ public final class TranscriberViewModel: ObservableObject {
         if let s = self.session {
             do {
                 let captured = try await s.stop()
-                self.engine.setAudioFiles(id: id, files: captured.fileURLs)
+                self.engine.setAudioFiles(id: id, files: captured.fileURLs, startOffsets: captured.startOffsets)
             } catch {
-                // Stop failed; the files may still exist. Keep them and let
-                // the pipeline decide (it will fail and the user can retry).
+                processingError = error.localizedDescription
+                engine.fail(id: id, reason: processingError)
+                session = nil
+                sessionMeetingID = nil
+                meetings = engine.recent
+                activeMeeting = engine.active
+                persist()
+                isStopping = false
+                return
             }
         }
         // Persist the stopped state + recorded audio file URLs before the
@@ -214,6 +259,7 @@ public final class TranscriberViewModel: ObservableObject {
         self.session = nil
         self.sessionMeetingID = nil
         self.captureStatus = self.capture.status
+        isStopping = false
 
         // Kick off the post-stop pipeline (transcribe → summarize → retention).
         await self.runPipeline(for: id)
@@ -234,13 +280,19 @@ public final class TranscriberViewModel: ObservableObject {
     /// Run the pipeline for a specific meeting. Awaitable so tests drive it.
     @discardableResult
     public func runPipeline(for id: UUID) async -> Bool {
-        guard let meeting = engine.meeting(id: id) else { return false }
+        guard let meeting = engine.meeting(id: id),
+              meeting.status == .processing || meeting.status == .failed else { return false }
         guard !processingIDs.contains(id) else { return false }
         processingIDs.insert(id)
-        defer { processingIDs.remove(id) }
+        defer {
+            processingIDs.remove(id)
+            processingTasks[id] = nil
+            progressByMeeting[id] = nil
+        }
 
         processingError = nil
         processingProgress = ProcessingProgress(stage: .transcribing, fraction: 0)
+        progressByMeeting[id] = processingProgress
 
         do {
             // Resolve the pipeline from the *current* settings when a factory
@@ -248,13 +300,25 @@ public final class TranscriberViewModel: ObservableObject {
             // falling back to the fixed processor otherwise.
             let active: any MeetingProcessor =
                 processorFactory?(settings) ?? processor
-            let result = try await active.process(
-                meeting: meeting,
-                audio: CapturedAudio(fileURLs: meeting.audioFileURLs),
-                report: { [weak self] p in
-                    Task { @MainActor in self?.processingProgress = p }
-                }
-            )
+            let task = Task {
+                try await active.process(
+                    meeting: meeting,
+                    audio: CapturedAudio(fileURLs: meeting.audioFileURLs, startOffsets: meeting.audioStartOffsets),
+                    report: { [weak self] p in
+                        Task { @MainActor in
+                            guard let self, self.processingIDs.contains(id) else { return }
+                            self.processingProgress = p
+                            self.progressByMeeting[id] = p
+                        }
+                    }
+                )
+            }
+            processingTasks[id] = task
+            let result = try await withTaskCancellationHandler {
+                try await task.value
+            } onCancel: { task.cancel() }
+            try Task.checkCancellation()
+            guard !task.isCancelled else { throw CancellationError() }
 
             // Record the transcript (so it's inspectable before summarizing),
             // then mark summarized (clearing it unless retention keeps it).
@@ -267,26 +331,25 @@ public final class TranscriberViewModel: ObservableObject {
                 keepTranscript: policy.keepTranscript
             )
 
+            let toDelete = policy.artifactsToDelete(for: meeting)
+            engine.scheduleArtifactDeletion(id: id, urls: toDelete)
+            // The summary must be durable before any source audio is destroyed.
+            guard persist() else {
+                throw CocoaError(.fileWriteUnknown, userInfo: [NSLocalizedDescriptionKey:
+                    "The summary could not be saved. Audio was kept; check your data folder and retry."])
+            }
+
             // Retention side effect: delete the raw audio + transcript file per
             // settings. This is the product's core promise (keep only the
             // summary), made testable via the pure `RetentionPolicy` decision.
-            let toDelete = policy.artifactsToDelete(for: meeting)
-            for url in toDelete { try? FileManager.default.removeItem(at: url) }
-            if !policy.keepAudio {
-                engine.clearAudioFiles(id: id)
-            }
+            try artifacts.remove(toDelete)
             // The retention promise keeps only the summary: once the raw audio
             // and transcript file are deleted, the per-meeting directory is
             // empty and must not leak into the user's Application Support. If
             // the user opted to keep audio or the transcript, the directory
             // still holds those files and is left in place.
-            let dir = RecordingsDirectory.forMeeting(id)
-            if let contents = try? FileManager.default.contentsOfDirectory(
-                at: dir, includingPropertiesForKeys: nil,
-                options: [.skipsHiddenFiles]
-            ), contents.isEmpty {
-                try? FileManager.default.removeItem(at: dir)
-            }
+            try artifacts.removeEmptyDirectory(for: id)
+            engine.completeArtifactDeletion(id: id)
 
             processingProgress = nil
             self.meetings = engine.recent
@@ -300,10 +363,11 @@ public final class TranscriberViewModel: ObservableObject {
             self.notifyTerminal(id: id, errorDescription: nil)
             return true
         } catch {
-            engine.fail(id: id)
             processingProgress = nil
-            processingError = (error as? LocalizedError)?.errorDescription
-                ?? error.localizedDescription
+            processingError = error is CancellationError
+                ? "Processing was cancelled. Audio was kept; retry when you’re ready."
+                : (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            engine.fail(id: id, reason: processingError)
             self.meetings = engine.recent
             self.activeMeeting = engine.active
             self.persist()
@@ -319,6 +383,9 @@ public final class TranscriberViewModel: ObservableObject {
     /// is wired. The *content* decision is pure (`MeetingNotificationPolicy`);
     /// this only performs the side effect (calling the injected poster).
     private func notifyTerminal(id: UUID, errorDescription: String?) {
+        if let meeting = engine.meeting(id: id) {
+            showToast(meeting.status == .summarized ? "Summary ready: \(meeting.title)" : "Meeting failed: \(meeting.title)")
+        }
         guard let meeting = engine.meeting(id: id),
               let note = MeetingNotificationPolicy.notification(
                   for: meeting, errorDescription: errorDescription, settings: settings
@@ -326,10 +393,60 @@ public final class TranscriberViewModel: ObservableObject {
         notifier?(note)
     }
 
+    private func showToast(_ message: String) {
+        guard settings.showToasts else { return }
+        toastTask?.cancel()
+        toastMessage = message
+        toastTask = Task { [weak self] in
+            do { try await Task.sleep(nanoseconds: 4_000_000_000) }
+            catch { return }
+            self?.toastMessage = nil
+        }
+    }
+
+    /// Cleanup retries use the already-saved summary instead of charging for
+    /// another transcription/summary call. The stored URL list also respects
+    /// the retention choices that were in effect when the summary was saved.
+    @discardableResult
+    private func finishPendingRetention(_ meeting: Meeting) -> Bool {
+        guard let summary = meeting.summary else { return false }
+        // A prior save may have failed in this same process. Retry must make
+        // the in-memory summary durable too, before removing its source audio.
+        guard persist() else {
+            processingError = "The summary still could not be saved. Audio was kept; check the data folder and retry."
+            engine.fail(id: meeting.id, reason: processingError)
+            meetings = engine.recent
+            return false
+        }
+        do {
+            try artifacts.remove(meeting.pendingArtifactDeletion)
+            try artifacts.removeEmptyDirectory(for: meeting.id)
+            engine.completeArtifactDeletion(id: meeting.id)
+            engine.markSummarized(id: meeting.id, summary: summary, speakerCount: meeting.speakerCount,
+                                  keepTranscript: !meeting.transcript.isEmpty)
+            persist()
+            processingError = nil
+            meetings = engine.recent
+            return true
+        } catch {
+            processingError = "Audio cleanup could not finish: \(error.localizedDescription)"
+            engine.fail(id: meeting.id, reason: processingError)
+            persist()
+            meetings = engine.recent
+            return false
+        }
+    }
+
+    /// Stop a pipeline without discarding its original recording.
+    public func cancelProcessing(id: UUID) {
+        processingTasks[id]?.cancel()
+    }
+
     /// Retry a failed meeting's pipeline.
     @discardableResult
     public func retry(id: UUID) async -> Bool {
         guard let m = engine.meeting(id: id), m.status == .failed else { return false }
+        if m.summary != nil && !m.pendingArtifactDeletion.isEmpty { return finishPendingRetention(m) }
         engine.retry(id: id)
         self.meetings = engine.recent
         self.activeMeeting = engine.active
@@ -341,7 +458,13 @@ public final class TranscriberViewModel: ObservableObject {
 
     /// Update a setting and persist it.
     public func updateSettings(_ mutate: (inout AppSettings) -> Void) {
+        let previousBackend = settings.summaryBackend
+        let previousModel = settings.summaryModel
         mutate(&settings)
+        if previousBackend != settings.summaryBackend && previousModel == settings.summaryModel {
+            settings.summaryModel = AppSettings.defaultSummaryModel(for: settings.summaryBackend)
+        }
+        if !settings.showToasts { toastTask?.cancel(); toastMessage = nil }
         settingsStore?.save(settings)
     }
 
@@ -349,6 +472,7 @@ public final class TranscriberViewModel: ObservableObject {
 
     public func refreshLevels() {
         guard isRecording else { return }
+        captureStatus = capture.status
         levels[.mic] = capture.level(.mic)
         levels[.system] = capture.level(.system)
     }
@@ -356,10 +480,24 @@ public final class TranscriberViewModel: ObservableObject {
     // MARK: - Persistence (Phase 5)
 
     public func delete(id: UUID) {
+        guard let meeting = engine.meeting(id: id),
+              meeting.status != .recording, meeting.status != .processing,
+              !processingIDs.contains(id) else { return }
+        do { try artifacts.discard(meeting) }
+        catch {
+            processingError = "Could not delete this meeting’s files: \(error.localizedDescription)"
+            return
+        }
+        let remaining = engine.stored.filter { $0.id != id }
+        guard meetingStore?.save(remaining, sanitizeBackup: true) ?? true else {
+            processingError = "The meeting’s files were deleted, but history could not be saved. Check the data folder’s permissions, then retry Delete."
+            return
+        }
         if engine.delete(id: id) {
+            processingError = nil
+            showToast("Meeting deleted")
             meetings = engine.recent
             activeMeeting = engine.active
-            persist()
         }
     }
 

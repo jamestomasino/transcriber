@@ -18,44 +18,60 @@ struct ContentView: View {
     @State private var newTitle: String = ""
     /// The meeting currently selected in the list, shown in the detail pane.
     @State private var selection: Meeting.ID?
+    @State private var query = ""
+    @State private var showSetup = false
 
     var body: some View {
         VStack(spacing: 0) {
             header
             Divider()
-            if vm.isRecording {
-                meter
-                Divider()
-            }
-            if vm.hasCaptureProblem {
-                statusCard
-                Divider()
-            }
-            NavigationSplitView {
-                list
-            } detail: {
-                if let id = selection, let m = vm.meetings.first(where: { $0.id == id }) {
-                    MeetingDetailView(vm: vm, meeting: m)
-                } else {
-                    detailPlaceholder
+            if vm.isRecording { meter; Divider() }
+            if vm.hasCaptureProblem || vm.processingError != nil { statusCard; Divider() }
+            HSplitView {
+                list.frame(minWidth: 220, idealWidth: 280, maxWidth: 340)
+                Group {
+                    if let id = selection, let m = vm.meetings.first(where: { $0.id == id }) {
+                        MeetingDetailView(vm: vm, meeting: m)
+                    } else {
+                        detailPlaceholder
+                    }
                 }
+                .frame(minWidth: 380, maxWidth: .infinity, maxHeight: .infinity)
             }
-            .navigationSplitViewStyle(.balanced)
         }
-        .frame(minWidth: 560, minHeight: 360)
-        .onAppear { vm.startLevelMeter() }
+        .frame(minWidth: 800, minHeight: 440)
+        .overlay(alignment: .bottom) {
+            if let message = vm.toastMessage {
+                Text(message).font(.callout).padding(12)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+                    .padding()
+                    .accessibilityLabel(message)
+            }
+        }
+        .sheet(isPresented: $showSetup) {
+            VStack { OnboardingView(vm: vm); Button("Done") { showSetup = false }.padding() }.frame(width: 560)
+        }
+        .onAppear { selection = selection ?? vm.meetings.first?.id; vm.startLevelMeter() }
+        .onChange(of: vm.meetings.map(\.id)) { _, ids in
+            if selection.map({ !ids.contains($0) }) ?? true { selection = ids.first }
+        }
         .onDisappear { vm.stopLevelMeter() }
     }
 
+    @ViewBuilder
     private var detailPlaceholder: some View {
-        VStack(spacing: 8) {
-            Image(systemName: "doc.text.magnifyingglass")
-                .font(.largeTitle)
-                .foregroundStyle(.secondary)
-            Text("Select a meeting to read its summary")
-                .foregroundStyle(.secondary)
+        if vm.meetings.isEmpty {
+            ScrollView { OnboardingView(vm: vm).frame(maxWidth: .infinity) }
+        } else {
+            VStack(spacing: 8) {
+                Image(systemName: "doc.text.magnifyingglass")
+                    .font(.largeTitle)
+                    .foregroundStyle(.secondary)
+                Text("Select a meeting to read its summary")
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var header: some View {
@@ -66,13 +82,18 @@ struct ContentView: View {
             Text("Transcriber")
                 .font(.title2.bold())
             Spacer()
-            if vm.isRecording {
+            Button { showSetup = true } label: { Image(systemName: "questionmark.circle") }
+                .help("Setup and permissions")
+            if vm.isRecording || vm.isStopping {
                 HStack(spacing: 8) {
                     Image(systemName: "circle.fill")
                         .foregroundStyle(.red)
                         .symbolEffect(.variableColor, options: .repeating)
-                    Text("Recording")
-                        .foregroundStyle(.secondary)
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        Text(vm.isStopping ? "Finishing recording…" : vm.isStarting ? "Starting…" : elapsed(at: context.date))
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 Button {
                     vm.stop()
@@ -80,6 +101,7 @@ struct ContentView: View {
                     Label("Stop", systemImage: "stop.circle.fill")
                 }
                 .buttonStyle(.borderedProminent)
+                .disabled(vm.isStarting || vm.isStopping)
             } else {
                 TextField("Meeting name (optional)", text: $newTitle)
                     .frame(maxWidth: 220)
@@ -91,6 +113,7 @@ struct ContentView: View {
                     Label("Start", systemImage: "mic.fill")
                 }
                 .buttonStyle(.borderedProminent)
+                .disabled(vm.settings.requestedSources.isEmpty || vm.isStarting || vm.isStopping)
             }
         }
         .padding(12)
@@ -106,11 +129,11 @@ struct ContentView: View {
                 LevelBar(title: "Microphone",
                          level: vm.level(.mic),
                          icon: "mic.fill",
-                         active: vm.captureStatus[.mic] == nil)
+                         active: vm.settings.captureMic && vm.captureStatus[.mic] == nil)
                 LevelBar(title: "System audio",
                          level: vm.level(.system),
                          icon: "speaker.wave.2.fill",
-                         active: vm.captureStatus[.system] == nil)
+                         active: vm.settings.captureSystem && vm.captureStatus[.system] == nil)
             }
         }
         .padding(12)
@@ -122,9 +145,11 @@ struct ContentView: View {
     /// Shown whenever at least one requested source failed to start.
     private var statusCard: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Label("Some audio isn't being captured", systemImage: "exclamationmark.triangle.fill")
+            Label(vm.hasCaptureProblem ? "Some audio isn't being captured" : "Meeting needs attention", systemImage: "exclamationmark.triangle.fill")
                 .font(.headline)
                 .foregroundStyle(.orange)
+            if let error = vm.processingError { Text(error).font(.callout).foregroundStyle(.secondary) }
+            Button("Setup and permissions") { showSetup = true }
             ForEach(vm.captureStatusMessages, id: \.self) { msg in
                 Text(msg)
                     .font(.callout)
@@ -138,25 +163,32 @@ struct ContentView: View {
     }
 
     private var list: some View {
-        Group {
+        VStack(spacing: 0) {
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                TextField("Search meetings", text: $query).textFieldStyle(.roundedBorder)
+            }
+            .padding(10)
+            Divider()
             if vm.meetings.isEmpty {
                 VStack(spacing: 8) {
                     Image(systemName: "mic.slash")
                         .font(.largeTitle)
                         .foregroundStyle(.secondary)
-                    Text("No meetings yet")
-                        .foregroundStyle(.secondary)
+                    Text("No meetings yet").foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 List(selection: $selection) {
-                    ForEach(vm.meetings) { m in
+                    ForEach(vm.search(query)) { m in
                         HStack {
                             Image(systemName: statusIcon(m.status))
                                 .foregroundStyle(statusColor(m.status))
                                 .frame(width: 18)
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(m.title).font(.headline)
+                                Text(m.startedAt, style: .date)
+                                    .font(.caption).foregroundStyle(.secondary)
                                 Text(statusLabel(m.status))
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
@@ -174,6 +206,11 @@ struct ContentView: View {
                 .listStyle(.inset)
             }
         }
+    }
+
+    private func elapsed(at now: Date) -> String {
+        let seconds = max(0, Int(now.timeIntervalSince(vm.activeMeeting?.startedAt ?? now)))
+        return String(format: "%d:%02d:%02d", seconds / 3600, seconds / 60 % 60, seconds % 60)
     }
 
     private func statusIcon(_ s: MeetingStatus) -> String {

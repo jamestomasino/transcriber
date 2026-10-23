@@ -5,83 +5,21 @@ captures Zoom / Slack / Teams conversations), then turns that recording into a
 **transcript with identified speakers**, writes a **meeting summary**, and keeps
 only the **summary** — deleting the audio and the transcript.
 
-> **Implementation progress (as of the meeting detail pane, orphan sweep, notifications, and long-meeting hardening).**
-> Phases 0–5 plus the Settings window, menu bar, the meeting detail pane, the
-> startup orphan sweep, **notifications**, and **long-meeting hardening** are
-> built and green (285 tests, `bash build.sh test`):
-> the pure core model + engine, mic +
-> system audio capture, the **transcribe → diarize → summarize → retention**
-> pipeline (pluggable Apple Speech / Deepgram + **local (on-device Apple
-> Intelligence)** / OpenAI / Anthropic), **durable
-> persistence** via `MeetingStore` → `meetings.json`, and a **Settings window**
-> (⌘,) for backends, models, retention, language, and API keys (Keychain).
-> The summary survives a relaunch (the product's core promise), and a meeting
-> that was mid-flight when the app quit is reconciled to a retryable `.failed`
-> state on next launch. The pipeline is now **rebuilt from the current settings
-> at run time** (a `processorFactory` seam on the view model), so switching
-> backend or model in Settings takes effect on the next meeting without a
-> relaunch. A **menu-bar item** offers a live Start / Stop. Selecting a meeting
-> opens a **detail pane** with the full structured summary, the retained
-> transcript (when kept), a **Retry** button for failed meetings, and
-> **copy** / **delete** actions — the copyable text comes from pure Core
-> helpers (`summaryText()` / `transcriptText()`). The **startup orphan sweep**
-> is done: retention now removes the empty per-meeting recording directory after
-> a successful summary, and `TranscriberViewModel` runs a pure
-> `RecordingsDirectory.orphanDirectories(liveIDs:)` decision at launch to clear
-> any that outlived their meeting (a live, non-empty dir is always kept so a
-> failed meeting's audio stays retryable) — so no empty directories leak into
-> `~/Library/Application Support`. **Notifications** are done: the previously
-> dead `notifyOnSummary` toggle now drives a real macOS banner — a pure
-> `MeetingNotificationPolicy.notification(for:errorDescription:settings:)`
-> decision in Core (nothing for `.recording`/`.processing`, a "Summary ready:
-> {overall}" note on success, a "This meeting failed: {reason}…" error note on
-> failure, and nothing at all when the toggle is off) feeds a `notifier` seam
-> on the view model, and the App layer posts it via `UserNotifications`
-> (requesting authorization once at launch). The decision is pure Core and
-> tested; the App owns the platform framework. **Local (on-device) summary** is
-> done: a `SummaryBackend.local` case routes to an App-layer `LocalSummarizer`
-> built on Apple's on-device `SystemLanguageModel` (`FoundationModels`,
-> Apple Intelligence) via `LanguageModelSession.streamResponse(to:).collect()`
-> — fully offline, no key, no download — and it reuses the shared
-> `Summary.prompt` / `Summary.parse`, so it emits the same JSON contract as the
-> cloud backends and the detail pane / copy / retention paths are unchanged.
-> The framework is gated to macOS 26.0+, so the call is wrapped in a
-> `#available` guard and the summarizer degrades to a clear "use OpenAI /
-> Anthropic" error on older systems (the app still builds and runs on macOS
-> 14+; the option is simply unavailable there). This makes the whole app
-> runnable locally: local transcription + local summary, zero cloud. Verified
-> with a live run — the real on-device model summarized a real transcript into
-> a correct structured summary (overall, key points, decision, action item),
-> offline. **Long-meeting hardening** is
-> done: the real HTTP client (`URLSessionHTTPClient`) now uses a dedicated
-> `URLSession` with a generous request timeout (`HTTPRetryPolicy.
-> defaultRequestTimeout`, 300s) instead of `URLSession.shared`'s 60s cap, so a
-> long recording's upload to Deepgram or a long transcript's trip to the LLM
-> can't be cut off mid-flight; and the pipeline's client is wrapped in a pure
-> `HTTPRetryPolicy`-driven `RetryingHTTPClient` (Core) that retries transient
-> 429 / 5xx / network-timeout failures up to a cap while never retrying 4xx
-> client errors — the decision is pure Core and tested with a scripted fake, the
-> backoff delay is injectable so the suite stays instant, and the App wires the
-> real client + retry into `ProcessorFactory` by default. The **transcript cap**
-> is also done: both LLM summarizers fit the transcript into a generous
-> `Summary.defaultTranscriptBudget` (120k chars) via the pure
-> `Summary.fitTranscript`, which keeps the opening (agenda/context) and the
-> closing (decisions/action items) and marks the omission in between — so a very
-> long recording's prompt stays inside the model's context window and cost
-> budget instead of failing the summary with a 400. And because that cap is a
-> *partial view*, the **user is told**: `MeetingSummary.transcriptWasCapped`
-> (lenient-decoded, so old stored summaries load as uncapped) is set by both
-> summarizers when the transcript didn't fit, carried through the pipeline to
-> the persisted summary, and surfaced three ways — the detail pane shows an
-> orange warning banner, `summaryText()` (the Copy path) prepends a
-> "partial view" note, and the flag survives encode/decode so the caveat is
-> still there after a relaunch. Remaining: the
-> Phase 7 onboarding polish and a live end-to-end run with a real key. Note:
-> the detail pane's on-screen rendering has been verified only
-> indirectly — the app launches with seeded data and its window opens, and the
-> copyable text it shows is covered by
-> the integration test — but the live display was asleep during the session, so
-> a visual confirmation of the rendered pane is still outstanding.
+> **Current implementation status — 23 October 2026.** Phases 0–7 are
+> implemented, including first-run setup and permission guidance, microphone
+> selection, both-source transcription with aligned mixing, searchable summary
+> history, live timers, cancellation, durable failure reasons, and retention
+> recovery after an interrupted cleanup. A full review of §§1–18 also corrected
+> fresh-install storage, backup recovery, cloud request/response mismatches,
+> strict offline Speech behavior, and long local summaries. See
+> [docs/PLAN_REVIEW.md](docs/PLAN_REVIEW.md) for findings, improvements, scope
+> decisions, and validation limits. The CLT-only build and SDK fallback remain
+> required. `bash build.sh test` runs Core assertions and real media checks;
+> [Validation/README.md](Validation/README.md) describes the isolated UI and live
+> checks. Live system capture and Apple Intelligence summarization have been
+> exercised. A fully authenticated recording-to-transcript-to-summary run,
+> including live Speech permission or a cloud transcription key, remains an
+> acceptance check; it is not claimed complete by the fake-HTTP tests.
 
 This plan is written to be implemented on top of the `timetracker` repo: same
 architecture, same build system, same conventions. Where it differs, the
@@ -737,3 +675,23 @@ Each phase ends in a **buildable, testable** state (`bash build.sh test`).
   **backend/model**, and **retention**.
 - Menu bar start/stop works; permissions are requested and surfaced clearly.
 - Core remains pure and fully unit-tested; no AVFoundation/network in Core.
+
+
+## 19. Final implementation review
+
+The original sections above preserve the design history. The authoritative
+implementation audit is [docs/PLAN_REVIEW.md](docs/PLAN_REVIEW.md). In particular:
+
+- Defaults are local Apple Speech transcription and OpenAI summaries. Fully
+  local summarization is selectable with Apple Intelligence; local speaker
+  labeling remains approximate.
+- Summary saves precede deletion, and pending cleanup decisions survive a crash.
+  Failed cleanup can be retried without repeating provider requests.
+- Audio devices, source toggles, settings, retention, search, detail actions,
+  timers, onboarding, notifications, and toasts are implemented.
+- Local long meetings use section summaries; cloud requests retain their
+  existing transcript cap and partial-view warning.
+- Data-location changes apply on restart and do not migrate existing history.
+- Automated assertions and actual media exports pass. Live Speech authorization,
+  an authenticated cloud end-to-end run, and distribution credentials are still
+  required to finish those environment-dependent acceptance checks.

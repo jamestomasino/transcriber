@@ -21,15 +21,19 @@ The summary is the only thing that sticks around. That's the point.
 
 - **One-tap meetings.** Start and stop a recording (optionally with a name) from
   the main window or the **menu bar** — no need to focus the app.
-- **Both sides of the call.** Microphone *and* system audio, captured as
-  separate tracks so you hear what you said and what the other side said.
-- **Speaker labels.** The transcript separates who said what (Speaker 1,
-  Speaker 2, …).
+- **Both sides of the call.** Microphone *and* system audio are recorded as
+  separate tracks, then mixed with their start offsets for transcription.
+  Cloud-bound audio is compressed before upload. Temporary mixes are removed
+  after transcription, including when it fails.
+- **Speaker labels.** Deepgram separates voices into Speaker 1, Speaker 2, ….
+  Local speech uses approximate labels based on pauses; it cannot reliably
+  identify different people.
 - **A structured summary.** Overall, key points, decisions, and action items —
   not a wall of text.
-- **Private by default.** The default path runs **entirely on your Mac**:
-  on-device transcription (Apple Speech) + on-device summarization (Apple
-  Intelligence). No account, no API key, no network.
+- **A fully local option.** Choose Local transcription (Apple Speech) and Local
+  summarization (Apple Intelligence) to keep the whole pipeline on your Mac.
+  No account or API key. Local transcription is the default; summaries default
+  to OpenAI until you change the backend in Settings.
 - **Cloud when you want it.** Swap in Deepgram (best speaker ID) or
   OpenAI / Anthropic (stronger summaries) with a key — or mix and match per
   stage.
@@ -129,8 +133,9 @@ rather than echoing the secret back.
 - **Your summaries persist** to `meetings.json` (with a one-generation backup
   and a corrupt-file fallback), so they survive a relaunch.
 - **Choose where data goes** in Settings → *Storage* → **Data location**. The
-  default is `~/Library/Application Support/Transcriber`; pick any folder you
-  like, or **Reset** to go back to the default.
+  default is `~/Library/Application Support/Transcriber`; pick a folder or
+  **Reset** to return to the default. Restart to use the chosen location.
+  Existing meetings stay in their original folder; this does not migrate them.
 - **Cloud backends send audio / transcript to that provider** (Deepgram, OpenAI,
   or Anthropic) to do their job. Local backends send nothing anywhere.
 
@@ -139,11 +144,12 @@ rather than echoing the secret back.
 ## Settings (⌘,)
 
 Everything is configurable and saved immediately. Changing a backend or model
-takes effect on the **next meeting** — no relaunch needed.
+takes effect on the **next meeting** or retry — no relaunch needed. Switching
+summary providers selects a compatible model; you can then enter a custom model.
 
 | Section        | What you can set                                                        |
 | -------------- | ----------------------------------------------------------------------- |
-| **Audio**      | Capture microphone / capture system audio (independently).             |
+| **Audio**      | Capture microphone / system audio; microphone device picker.          |
 | **Storage**    | Keep transcript / keep audio after summary; **Data location** picker.  |
 | **Transcription** | Backend (Local / Deepgram), language code, and the Deepgram key.     |
 | **Summary**    | Backend (Local / OpenAI / Anthropic), model, and the provider key.     |
@@ -170,11 +176,15 @@ still be fully local).
 **"A meeting shows as failed."**
 Open it and hit **Retry** — it re-runs with your current backend and key.
 Transient network and rate-limit failures are retried automatically; a persistent
-one (e.g. a bad key) will surface the reason so you can fix it.
+one (e.g. a bad key) shows its reason, including after relaunch. You can cancel
+processing without deleting the source audio. Cleanup retries reuse a saved
+summary instead of calling the providers again.
 
 **"My summary says it's a partial view."**
-The meeting was very long, so the transcript was capped to fit the model's
-context window (keeping the opening and closing). The full record is still
+A model request needed a shorter transcript, keeping its opening and closing.
+Cloud summaries cap very long transcripts. Local summaries normally process
+all sections in separate requests and combine the results; unusually dense
+text may still need a smaller per-request cap. The full transcript remains
 available if you enabled "Keep transcript."
 
 ---
@@ -183,8 +193,13 @@ available if you enabled "Keep transcript."
 
 ```bash
 bash build.sh          # build the app
-bash build.sh test     # build + run the full test suite
+bash build.sh test     # build + run Core assertions and real media checks
 ```
+
+See [Validation/README.md](Validation/README.md) for isolated UI fixtures and
+optional live capture / local model checks. [The plan review](docs/PLAN_REVIEW.md)
+records the final implementation audit and remaining environment-dependent
+acceptance checks.
 
 The build uses `swiftc` only (no Xcode, no SwiftPM at build time). If your
 Command Line Tools SDK can't compile SwiftUI's `@State` / `@Observable` macros,

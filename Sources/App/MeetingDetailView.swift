@@ -21,6 +21,7 @@ struct MeetingDetailView: View {
 
     @State private var copied: String? = nil
     @State private var retrying: Bool = false
+    @State private var confirmDelete = false
 
     /// The meeting as it currently stands (it can change while we're looking
     /// at it — e.g. retry flips failed → summarized). Re-read from the VM so
@@ -32,10 +33,10 @@ struct MeetingDetailView: View {
             VStack(alignment: .leading, spacing: 16) {
                 header
                 Divider()
-                if let s = live?.summary {
-                    summaryBody(s)
-                } else if live?.status == .failed {
+                if live?.status == .failed {
                     failedBody
+                } else if let s = live?.summary {
+                    summaryBody(s)
                 } else if live?.status == .processing || live?.status == .recording {
                     inFlightBody
                 } else {
@@ -50,7 +51,12 @@ struct MeetingDetailView: View {
             }
             .padding(16)
         }
+        .textSelection(.enabled)
         .frame(minWidth: 380, maxWidth: .infinity)
+        .confirmationDialog("Delete this meeting and its retained audio and transcript?", isPresented: $confirmDelete) {
+            Button("Delete meeting", role: .destructive) { vm.delete(id: meeting.id) }
+            Button("Cancel", role: .cancel) {}
+        }
     }
 
     // MARK: - Header
@@ -106,6 +112,7 @@ struct MeetingDetailView: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.bottom, 4)
         }
+        if !s.model.isEmpty { Text("Summary model: \(s.model)").font(.caption).foregroundStyle(.secondary) }
         Text(s.overall.isEmpty ? "—" : s.overall)
             .font(.body)
             .fixedSize(horizontal: false, vertical: true)
@@ -169,7 +176,7 @@ struct MeetingDetailView: View {
                   systemImage: "exclamationmark.triangle.fill")
                 .font(.headline)
                 .foregroundStyle(.red)
-            if let err = vm.processingError {
+            if let err = live?.failureReason {
                 Text(err)
                     .font(.callout)
                     .foregroundStyle(.secondary)
@@ -186,7 +193,7 @@ struct MeetingDetailView: View {
             ProgressView()
             Text(live?.status == .recording
                  ? "Recording — stop the meeting to generate a summary."
-                 : "Working on it…")
+                 : (vm.progressByMeeting[meeting.id]?.stage.rawValue.capitalized ?? "Working on it") + "…")
                 .font(.callout)
                 .foregroundStyle(.secondary)
         }
@@ -202,6 +209,12 @@ struct MeetingDetailView: View {
 
     private var actions: some View {
         HStack(spacing: 10) {
+            if live?.status == .processing {
+                Button("Cancel processing") { vm.cancelProcessing(id: meeting.id) }
+            }
+            if live?.status == .recording {
+                Button("Stop recording") { vm.stop() }.disabled(vm.isStarting)
+            }
             if live?.status == .failed {
                 Button {
                     retrying = true
@@ -228,12 +241,17 @@ struct MeetingDetailView: View {
                           systemImage: "doc.on.doc")
                 }
             }
+            if let url = live?.audioFileURLs.values.first {
+                Button { NSWorkspace.shared.activateFileViewerSelecting([url]) } label: { Image(systemName: "folder") }
+                    .help("Show retained audio in Finder")
+            }
             Spacer()
             Button(role: .destructive) {
-                vm.delete(id: meeting.id)
+                confirmDelete = true
             } label: {
                 Label("Delete", systemImage: "trash")
             }
+            .disabled(live?.status == .recording || live?.status == .processing)
         }
     }
 
