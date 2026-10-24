@@ -102,6 +102,7 @@ public final class TranscriberViewModel: ObservableObject {
         // meetings to .failed), then reflect the loaded state in the UI.
         if let store = meetingStore {
             engine.load(store.load())
+            if let error = store.lastError { self.processingError = error }
         }
         self.meetings = engine.recent
         self.activeMeeting = engine.active
@@ -110,9 +111,12 @@ public final class TranscriberViewModel: ObservableObject {
         // the audio files but not the dir, or a crash mid-pipeline). This is
         // idempotent and safe — it only touches managed meeting dirs that aren't a
         // live meeting's (or are a live meeting's but already empty).
-        self.sweepOrphanRecordings()
+        if meetingStore?.lastError == nil { self.sweepOrphanRecordings() }
         // Resume a cleanup interrupted after the summary was safely saved.
-        for meeting in engine.stored where meeting.summary != nil && !meeting.pendingArtifactDeletion.isEmpty {
+        for meeting in engine.stored where meetingStore?.lastError == nil && meeting.deletionPending {
+            delete(id: meeting.id)
+        }
+        for meeting in engine.stored where meetingStore?.lastError == nil && !meeting.deletionPending && meeting.summary != nil && !meeting.pendingArtifactDeletion.isEmpty {
             finishPendingRetention(meeting)
         }
         self.meetings = engine.recent
@@ -125,6 +129,7 @@ public final class TranscriberViewModel: ObservableObject {
     /// the directories removed, so tests can assert the sweep's effect.
     @discardableResult
     public func sweepOrphanRecordings() -> [URL] {
+        guard meetingStore?.lastError == nil else { return [] }
         let liveIDs = Set(engine.stored.map(\.id))
         return artifacts.sweep(liveIDs: liveIDs)
     }
@@ -135,7 +140,10 @@ public final class TranscriberViewModel: ObservableObject {
     /// is wired). Called after every mutation that should survive a relaunch.
     @discardableResult
     private func persist() -> Bool {
-        meetingStore?.save(engine.stored) ?? true
+        guard let store = meetingStore else { return true }
+        guard store.save(engine.stored) else { return false }
+        engine.updateContentLocations(from: store.load())
+        return true
     }
 
     // MARK: - Derived
@@ -282,7 +290,7 @@ public final class TranscriberViewModel: ObservableObject {
     /// Run the pipeline for a specific meeting. Awaitable so tests drive it.
     @discardableResult
     public func runPipeline(for id: UUID, reuseTranscript: Bool = true, speakerOnly: Bool = false) async -> Bool {
-        guard var meeting = engine.meeting(id: id),
+        guard var meeting = engine.meeting(id: id), !meeting.deletionPending,
               meeting.status == .processing || meeting.status == .failed else { return false }
         guard !processingIDs.contains(id) else { return false }
         // Keep the old checkpoint on disk until a fresh transcription succeeds.
@@ -350,7 +358,7 @@ public final class TranscriberViewModel: ObservableObject {
                 )
             }
 
-            let toDelete = speakerOnly ? [] : policy.artifactsToDelete(for: meeting)
+            let toDelete = speakerOnly ? [] : policy.artifactsToDelete(for: engine.meeting(id: id) ?? meeting)
             engine.scheduleArtifactDeletion(id: id, urls: toDelete)
             // The summary must be durable before any source audio is destroyed.
             guard persist() else {
@@ -479,7 +487,7 @@ public final class TranscriberViewModel: ObservableObject {
     /// with retained audio. Keep the previous result until new stages succeed.
     @discardableResult
     public func retry(id: UUID, reuseTranscript: Bool = true) async -> Bool {
-        guard let m = engine.meeting(id: id), !processingIDs.contains(id),
+        guard let m = engine.meeting(id: id), !m.deletionPending, !processingIDs.contains(id),
               m.status == .failed || (!reuseTranscript && m.status == .summarized &&
                   !m.audioFileURLs.isEmpty && m.pendingArtifactDeletion.isEmpty) else { return false }
         if m.summary != nil && !m.pendingArtifactDeletion.isEmpty { return finishPendingRetention(m) }
@@ -514,7 +522,7 @@ public final class TranscriberViewModel: ObservableObject {
     /// Speaker count and labels are always inferred from the audio.
     @discardableResult
     public func reprocessSpeakers(id: UUID) async -> Bool {
-        guard let m = engine.meeting(id: id), m.status == .summarized,
+        guard let m = engine.meeting(id: id), !m.deletionPending, m.status == .summarized,
               !m.transcript.isEmpty, !m.audioFileURLs.isEmpty,
               m.pendingArtifactDeletion.isEmpty, !processingIDs.contains(id), m.summary != nil else { return false }
         engine.retry(id: id, allowCompleted: true)
@@ -561,7 +569,12 @@ public final class TranscriberViewModel: ObservableObject {
         guard let meeting = engine.meeting(id: id),
               meeting.status != .recording, meeting.status != .processing,
               !processingIDs.contains(id) else { return }
-        do { try artifacts.discard(meeting) }
+        engine.markDeletionPending(id: id)
+        guard persist() else {
+            processingError = "Could not save the deletion request. All meeting files were kept."
+            return
+        }
+        do { try artifacts.discard(engine.meeting(id: id) ?? meeting) }
         catch {
             processingError = "Could not delete this meeting’s files: \(error.localizedDescription)"
             return

@@ -154,7 +154,7 @@ struct MeetingDetailView: View {
     private func transcriptBody(_ segments: [TranscriptSegment]) -> some View {
         SectionText("Transcript")
         VStack(alignment: .leading, spacing: 8) {
-            ForEach(Array(segments.enumerated()), id: \.offset) { _, seg in
+            ForEach(Array(TranscriptCleanup.readable(segments).enumerated()), id: \.offset) { _, seg in
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text(seg.speaker)
                         .font(.callout.bold())

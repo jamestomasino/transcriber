@@ -71,11 +71,10 @@ struct WhisperTranscriber: Transcriber {
                 guard let text = api.text(context, index) else { continue }
                 let segment = TranscriptSegment(speaker: "Speaker 1", text: String(cString: text).trimmingCharacters(in: .whitespacesAndNewlines),
                     startOffset: offset + Double(api.start(context, index)) / 100,
-                    endOffset: offset + Double(api.end(context, index)) / 100)
+                    endOffset: offset + Double(api.end(context, index)) / 100, audioSectionStart: offset)
                 guard !segment.text.isEmpty else { continue }
-                // Overlap protects words at a section boundary. Discard only
-                // segments already entirely covered by the preceding section.
-                if let previous = result.last, segment.endOffset <= previous.endOffset { continue }
+                // Keep alternate boundary wording until speaker-aware text
+                // cleanup can establish a duplicate; timestamps alone cannot.
                 result.append(segment)
             }
             if file.framePosition >= file.length { break }

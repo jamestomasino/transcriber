@@ -32,23 +32,28 @@ public struct TranscriptSegment: Codable, Equatable, Sendable {
     public var text: String
     public var startOffset: TimeInterval
     public var endOffset: TimeInterval
+    /// Origin of an overlapping ASR audio section; absent for legacy/provider
+    /// transcripts. This is timing provenance, never a speaker identity.
+    public var audioSectionStart: TimeInterval?
 
     public init(
         speaker: String,
         text: String,
         startOffset: TimeInterval = 0,
-        endOffset: TimeInterval = 0
+        endOffset: TimeInterval = 0,
+        audioSectionStart: TimeInterval? = nil
     ) {
         self.speaker = speaker
         self.text = text
         self.startOffset = startOffset
         self.endOffset = endOffset
+        self.audioSectionStart = audioSectionStart
     }
 }
 
 public extension TranscriptSegment {
-    /// Turn word timestamps into readable utterances without erasing the
-    /// pauses used by the local diarizer to estimate speaker changes.
+    /// Turn word timestamps into short utterances for acoustic alignment.
+    /// Paragraph assembly happens after speaker matching.
     static func utterances(from words: [TranscriptSegment]) -> [TranscriptSegment] {
         var result: [TranscriptSegment] = []
         for word in words.sorted(by: { $0.startOffset < $1.startOffset }) {
@@ -137,9 +142,24 @@ public struct MeetingSummary: Codable, Equatable, Sendable {
     }
 }
 
-/// A meeting: the recording, its (transient) transcript, and its (retained)
-/// summary. Decodable with lenient defaults so files written by older builds
-/// still load (mirrors the base repo's `TimeEntry` decoding strategy).
+/// Stable, managed locations and revision references in the metadata library.
+public struct MeetingContentFiles: Codable, Equatable, Sendable {
+    public var stem: String
+    public var summaryJSON: URL?
+    public var summaryMarkdown: URL?
+    public var summaryRevision: UUID?
+    public var transcriptJSON: URL?
+    public var transcriptText: URL?
+    public var transcriptRevision: UUID?
+    public var summaryURLs: [URL] { [summaryJSON, summaryMarkdown].compactMap { $0 } }
+    public var transcriptURLs: [URL] { [transcriptJSON, transcriptText].compactMap { $0 } }
+    public var allURLs: [URL] {
+        (summaryURLs + transcriptURLs).flatMap { [$0, $0.appendingPathExtension("bak")] }
+    }
+}
+
+/// A hydrated meeting. MeetingStore keeps its summary/transcript in separate
+/// files; lenient decoding also accepts older inline libraries for migration.
 public struct Meeting: Codable, Equatable, Identifiable, Sendable {
     public var id: UUID
     public var title: String
@@ -161,6 +181,8 @@ public struct Meeting: Codable, Equatable, Identifiable, Sendable {
     public var summary: MeetingSummary?
     public var failureReason: String?
     public var pendingArtifactDeletion: [URL]
+    public var contentFiles: MeetingContentFiles?
+    public var deletionPending: Bool
 
     public init(
         id: UUID = UUID(),
@@ -178,7 +200,9 @@ public struct Meeting: Codable, Equatable, Identifiable, Sendable {
         speakerAttribution: SpeakerAttribution = .unverified,
         summary: MeetingSummary? = nil,
         failureReason: String? = nil,
-        pendingArtifactDeletion: [URL] = []
+        pendingArtifactDeletion: [URL] = [],
+        contentFiles: MeetingContentFiles? = nil,
+        deletionPending: Bool = false
     ) {
         self.id = id
         self.title = title
@@ -196,12 +220,14 @@ public struct Meeting: Codable, Equatable, Identifiable, Sendable {
         self.summary = summary
         self.failureReason = failureReason
         self.pendingArtifactDeletion = pendingArtifactDeletion
+        self.contentFiles = contentFiles
+        self.deletionPending = deletionPending
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, title, status, startedAt, stoppedAt, duration, createdAt, lastActivityAt
         case audioFileURLs, audioStartOffsets, transcript, speakerCount, summary, failureReason, pendingArtifactDeletion
-        case speakerAttribution
+        case speakerAttribution, contentFiles, deletionPending
     }
 
     public init(from decoder: Decoder) throws {
@@ -222,6 +248,8 @@ public struct Meeting: Codable, Equatable, Identifiable, Sendable {
         summary = try d.decodeIfPresent(MeetingSummary.self, forKey: .summary)
         failureReason = try d.decodeIfPresent(String.self, forKey: .failureReason)
         pendingArtifactDeletion = try d.decodeIfPresent([URL].self, forKey: .pendingArtifactDeletion) ?? []
+        contentFiles = try d.decodeIfPresent(MeetingContentFiles.self, forKey: .contentFiles)
+        deletionPending = try d.decodeIfPresent(Bool.self, forKey: .deletionPending) ?? false
     }
 }
 
@@ -266,7 +294,7 @@ public extension Meeting {
     /// Empty string when there is no transcript (e.g. it was deleted by
     /// retention).
     func transcriptText() -> String {
-        transcript.map { "[\($0.speaker)] \($0.text)" }.joined(separator: "\n")
+        TranscriptCleanup.readable(transcript).map { "[\($0.speaker)] \($0.text)" }.joined(separator: "\n")
     }
 }
 

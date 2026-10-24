@@ -11,6 +11,21 @@ struct LocalInferenceChecks {
     }
     static func run() async throws {
         let arguments = CommandLine.arguments
+        if let index = arguments.firstIndex(of: "--inspect-cleanup"), arguments.indices.contains(index + 1), let id = UUID(uuidString: arguments[index + 1]) {
+            let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            let settings = SettingsStore(url: support.appendingPathComponent("Transcriber/settings.json")).load()
+            guard let meeting = MeetingStore(url: StorageDirectory.meetingsURL(settings: settings)).load().first(where: { $0.id == id }) else {
+                throw LocalInferenceError("The requested retained transcript was not found.")
+            }
+            let cleaned = TranscriptCleanup.deduplicated(meeting.transcript)
+            let paragraphs = TranscriptCleanup.paragraphs(cleaned)
+            let before = meeting.transcript.reduce(0) { $0 + $1.text.split(whereSeparator: \.isWhitespace).count }
+            let after = cleaned.reduce(0) { $0 + $1.text.split(whereSeparator: \.isWhitespace).count }
+            guard TranscriptCleanup.deduplicated(cleaned) == cleaned else { throw LocalInferenceError("Cleanup was not idempotent") }
+            print("✓ Read-only retained transcript check: \(meeting.transcript.count) segments → \(cleaned.count) cleaned segments → \(paragraphs.count) paragraphs; \(before - after) replayed words removed")
+            print("No meeting data, summary or audio was changed.")
+            return
+        }
         if arguments.contains("--catalog") {
             let memory = ProcessInfo.processInfo.physicalMemory
             let found = try await SummaryModelScanner().scan(memoryBytes: memory)

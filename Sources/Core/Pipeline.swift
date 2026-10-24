@@ -183,17 +183,18 @@ public struct PipelineProcessor: TranscriptCheckpointingProcessor, SpeakerReproc
 
         }
         try Task.checkCancellation()
-        try await checkpoint(segments)
+        let cleaned = TranscriptCleanup.deduplicated(segments)
+        try await checkpoint(cleaned)
         report(ProcessingProgress(stage: .summarizing, fraction: 0))
-        let summary = try await summarizer.summarize(segments: segments, title: meeting.title)
+        let summary = try await summarizer.summarize(segments: TranscriptCleanup.paragraphs(cleaned), title: meeting.title)
 
         guard !summary.overall.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               summary.overall != "(no summary produced)" else {
             throw LLMError("The model returned no summary. Audio was kept so you can retry.")
         }
-        try Summary.validateDetail(summary, segments: segments)
+        try Summary.validateDetail(summary, segments: cleaned)
         report(ProcessingProgress(stage: .summarizing, fraction: 1))
-        return ProcessedResult(segments: segments, summary: summary,
+        return ProcessedResult(segments: cleaned, summary: summary,
                                speakerAttribution: meeting.transcript.isEmpty ? speakerAttribution : meeting.speakerAttribution)
     }
 

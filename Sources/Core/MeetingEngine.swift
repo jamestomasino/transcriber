@@ -223,6 +223,20 @@ public final class MeetingEngine {
         return true
     }
 
+    public func markDeletionPending(id: UUID) {
+        guard let idx = index(of: id) else { return }
+        meetings[idx].deletionPending = true
+    }
+
+    /// Persistence assigns stable file locations without changing lifecycle or
+    /// replacing the engine's working transcript/summary.
+    public func updateContentLocations(from stored: [Meeting]) {
+        let files = Dictionary(stored.map { ($0.id, $0.contentFiles) }, uniquingKeysWith: { _, last in last })
+        for index in meetings.indices {
+            if let value = files[meetings[index].id] { meetings[index].contentFiles = value }
+        }
+    }
+
     // MARK: - Helpers
 
     private func index(of id: UUID) -> Int? {

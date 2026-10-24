@@ -80,13 +80,17 @@ public enum RecordingsDirectory {
     }
 
     public static func forMeeting(_ meeting: Meeting, timeZone: TimeZone = .current) -> URL {
+        base().appendingPathComponent(fileStem(for: meeting, timeZone: timeZone), isDirectory: true)
+    }
+
+    public static func fileStem(for meeting: Meeting, timeZone: TimeZone = .current) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.calendar = Calendar(identifier: .gregorian)
         formatter.timeZone = timeZone
         formatter.dateFormat = "yyyyMMdd-HHmm"
         let prefix = formatter.string(from: meeting.startedAt)
-        return base().appendingPathComponent("\(prefix)-\(meeting.id.uuidString)", isDirectory: true)
+        return "\(prefix)-\(meeting.id.uuidString)"
     }
 
     /// Recognize only our dated names and the original UUID-only names.
@@ -155,7 +159,7 @@ public extension AudioCaptureSession {
 // MARK: - Storage directory (Core, pure)
 //
 // Resolves the base directory for Transcriber *data* (meetings.json +
-// recordings/) from the user's settings. Pure: it only reads the settings
+// recordings/ + summaries/ + transcripts/) from the user's settings. Pure: it only reads the settings
 // value and applies the default — no I/O, no side effects.
 //
 // Design note: `settings.json` itself always lives in Application Support
@@ -377,6 +381,7 @@ public struct MeetingArtifacts: MeetingArtifactManaging {
 
     public func discard(_ meeting: Meeting) throws {
         try remove(RetentionPolicy(settings: AppSettings()).artifactsToDelete(for: meeting))
+        try remove(meeting.contentFiles?.allURLs ?? [])
         try remove(directories(for: meeting.id))
     }
 

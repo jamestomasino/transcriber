@@ -314,8 +314,7 @@ do {
     store.save([m1v2])
     let bak = file.appendingPathExtension("bak")
     check(FileManager.default.fileExists(atPath: bak.path), "save rotated the previous file to .bak")
-    let bakData = try? Data(contentsOf: bak)
-    let bakMeetings = (try? JSONDecoder().decode([Meeting].self, from: bakData ?? Data())) ?? []
+    let bakMeetings = MeetingStore(url: bak).load()
     check(bakMeetings.count == 2 && bakMeetings[0].summary?.overall == "One",
         ".bak holds the prior generation (recoverable)")
     check(MeetingStore(url: file).load()[0].summary?.overall == "One, revised.",
@@ -551,6 +550,90 @@ do {
 } catch {
     check(false, "pipeline composition: \(error)")
 }
+
+section("transcript cleanup: timed overlap and readable paragraphs")
+do {
+    func segment(_ text: String, _ start: Double, _ end: Double, _ speaker: String = "Alex", section: Double? = nil) -> TranscriptSegment {
+        TranscriptSegment(speaker: speaker, text: text, startOffset: start, endOffset: end, audioSectionStart: section)
+    }
+    let repeated = [segment("Please review the release checklist for Friday.", 0, 5, section: 0),
+                    segment("release, checklist for Friday; and send the report.", 3, 7, section: 3)]
+    let clean = TranscriptCleanup.deduplicated(repeated)
+    check(clean.count == 2 && clean[1].text == "and send the report." && clean[1].startOffset == 5 && clean[1].endOffset == 7,
+          "overlapping phrases are trimmed without losing new continuation or its ending time")
+    let paragraphs = TranscriptCleanup.paragraphs(clean)
+    check(paragraphs.count == 1 && paragraphs[0].text == "Please review the release checklist for Friday. and send the report.",
+          "same-speaker speech joins into paragraphs across sentence-ending punctuation")
+    check(paragraphs[0].startOffset == 0 && paragraphs[0].endOffset == 7, "paragraphs retain the full speaking interval")
+    check(TranscriptCleanup.deduplicated(clean) == clean, "overlap cleanup is idempotent")
+    let acrossTwo = TranscriptCleanup.deduplicated([segment("Please review the release", 0, 3, section: 0),
+        segment("checklist for Friday.", 3, 5, section: 0), repeated[1]])
+    check(acrossTwo.count == 3 && acrossTwo[2].text == "and send the report.", "overlap matching spans several short lines at a section edge")
+    let contained = TranscriptCleanup.deduplicated([segment("We should release on Monday after testing.", 2, 6),
+        segment("We should release on Monday", 2.1, 4.5)])
+    check(contained.count == 1, "timestamp-sorted legacy overlap can remove a contained duplicate line")
+    let different = [segment("We approved the launch on Monday.", 0, 6), segment("The deadline is now Friday.", 1, 4)]
+    check(TranscriptCleanup.deduplicated(different) == different, "fully covered timestamps cannot erase distinct wording")
+    let deliberate = [segment("We should release on Monday.", 0, 3), segment("We should release on Monday.", 3, 6)]
+    check(TranscriptCleanup.deduplicated(deliberate) == deliberate, "intentional repetition without overlap remains spoken text")
+    let slightOverlap = [segment("We should release on Monday.", 0, 3), segment("We should release on Monday.", 2.9, 6)]
+    check(TranscriptCleanup.deduplicated(slightOverlap) == slightOverlap, "tiny timestamp jitter does not justify deleting a repeated statement")
+    let sameSection = [segment("We should release on Monday.", 0, 4, section: 0), segment("We should release on Monday.", 2, 6, section: 0)]
+    check(TranscriptCleanup.deduplicated(sameSection) == sameSection, "known same-section repetition is preserved")
+    let otherSpeaker = [repeated[0], segment(repeated[1].text, 3, 7, "Blair", section: 3)]
+    check(TranscriptCleanup.readable(otherSpeaker).count == 2 && TranscriptCleanup.deduplicated(otherSpeaker) == otherSpeaker,
+          "repeated words across different speakers are neither merged nor removed")
+    let unknown = [segment("We should release on Monday.", 0, 4, "Unknown speaker"), segment("We should release on Monday.", 0, 4, "Unknown speaker")]
+    check(TranscriptCleanup.readable(unknown) == unknown, "unknown voice labels never imply a shared identity")
+    let short = [segment("Yes.", 0, 1), segment("Yes.", 1, 2)]
+    check(TranscriptCleanup.deduplicated(short) == short, "short conversational repetitions are preserved")
+    check(TranscriptCleanup.deduplicated([short[0], short[0]]).count == 1, "identical short lines with identical timestamps are genuine replay duplicates")
+    let jitter = [segment("Ready for release Friday.", 296, 299.8, section: 0),
+        segment("Ready for release Friday and send the report Monday.", 299.9, 304, section: 298)]
+    check(TranscriptCleanup.deduplicated(jitter).last?.text == "and send the report Monday.", "known replay provenance handles a small timing gap at a section edge")
+    let twice = [repeated[0], segment("release checklist for Friday release checklist for Friday and send the report.", 3, 8, section: 3)]
+    let once = TranscriptCleanup.deduplicated(twice)
+    check(once.last?.text == "release checklist for Friday and send the report." && TranscriptCleanup.deduplicated(once) == once,
+          "cleanup removes only the replayed prefix, not a second intentional repetition")
+    for pair in [("The estimated budget is $50.", "The estimated budget is €50."),
+                 ("The measurement was -5 mW.", "The measurement was 5 MW."),
+                 ("The dose is 10 mg.", "The dose is 20 mg."),
+                 ("We should not release on Friday.", "release on Friday."),
+                 ("The estimated value is 5 * 6.", "The estimated value is 5 / 6."),
+                 ("The estimated budget is ₹50.", "The estimated budget is 50."),
+                 ("The approved rate is 1.0%.", "The approved rate is 10%.")] {
+        let values = [segment(pair.0, 0, 5), segment(pair.1, 2, 6)]
+        check(TranscriptCleanup.deduplicated(values) == values, "changed values, units or negation survive: \(pair.1)")
+    }
+    let gap = TranscriptCleanup.paragraphs([segment("First sentence.", 0, 1), segment("After a pause.", 5, 6)])
+    check(gap.count == 2, "long pauses start a new paragraph without inventing a speaker")
+    let bounded = TranscriptCleanup.paragraphs([segment(String(repeating: "a", count: 1195), 0, 1), segment("Another sentence.", 1, 2)])
+    check(bounded.count == 2 && bounded[0].text.count == 1195, "paragraph character limits split blocks without truncation")
+    check(TranscriptCleanup.paragraphs([segment("Long turn.", 0, 60), segment("Continued.", 60, 62)]).count == 2,
+          "long speaker turns are bounded by speaking duration")
+    let legacy = try JSONDecoder().decode(TranscriptSegment.self, from: Data(#"{"speaker":"Alex","text":"Legacy","startOffset":0,"endOffset":1}"#.utf8))
+    check(legacy.audioSectionStart == nil, "legacy transcripts need no audio-section metadata migration")
+    check(try JSONDecoder().decode(TranscriptSegment.self, from: JSONEncoder().encode(repeated[1])) == repeated[1],
+          "audio-section provenance survives retention and summary retries")
+
+    final class CleanupSummarySpy: Summarizer, @unchecked Sendable {
+        var received: [TranscriptSegment] = []
+        func summarize(segments: [TranscriptSegment], title: String) async throws -> MeetingSummary {
+            received = segments
+            return MeetingSummary(overall: "Review the checklist and send the report.")
+        }
+    }
+    let spy = CleanupSummarySpy()
+    let pipeline = PipelineProcessor(transcriber: StubTranscriber(segs: repeated), diarizer: IdentityDiarizer(), summarizer: spy)
+    var checkpoint: [TranscriptSegment] = []
+    let meeting = Meeting(title: "Cleanup fixture", startedAt: t0, createdAt: t0, lastActivityAt: t0)
+    let processed = try await pipeline.process(meeting: meeting, audio: CapturedAudio(), report: { _ in }, checkpoint: { checkpoint = $0 })
+    check(checkpoint == clean && processed.segments == clean, "the durable transcript checkpoint receives deduplicated fine-grained segments")
+    check(spy.received == paragraphs, "the summarizer receives the same readable paragraphs as the transcript view")
+    var retry = meeting; retry.transcript = repeated
+    _ = try await pipeline.process(meeting: retry, audio: CapturedAudio(), report: { _ in }, checkpoint: { _ in })
+    check(spy.received == paragraphs, "summary-only retries clean older saved transcripts without retranscribing audio")
+} catch { check(false, "transcript cleanup: \(error)") }
 
 section("acoustic speaker alignment and safe speaker-only updates")
 do {
@@ -1928,12 +2011,12 @@ do {
                         summary: MeetingSummary(overall: "Persisted"))
     let store = MeetingStore(url: url)
     check(store.save([first]), "first save creates missing parent directories")
-    check(MeetingStore(url: url).load() == [first], "fresh store reads durable summary")
+    check(MeetingStore(url: url).load().first?.summary == first.summary, "fresh store reads durable summary")
     check(store.save([]), "next save succeeds")
     try Data("broken".utf8).write(to: url)
-    check(MeetingStore(url: url).load() == [first], "corrupt live file recovers previous good backup")
+    check(MeetingStore(url: url).load().first?.summary == first.summary, "corrupt live file recovers previous good backup")
     check(MeetingStore(url: url).save([first]), "save repairs corrupt live file")
-    check(MeetingStore(url: url.appendingPathExtension("bak")).load() == [first], "repair preserves valid backup")
+    check(MeetingStore(url: url.appendingPathExtension("bak")).load().first?.summary == first.summary, "repair preserves valid backup")
     let settingsURL = root.appendingPathComponent("new/settings.json")
     SettingsStore(url: settingsURL).save(AppSettings(captureSystem: false))
     check(!SettingsStore(url: settingsURL).load().captureSystem, "settings save creates missing directory")
@@ -1995,10 +2078,12 @@ do {
     check(failedRecord.failureReason != nil, "failure reason is stored with its meeting")
     failedVM.delete(id: failedMeeting.id)
     check(failedVM.meetings.count == 1, "failed file deletion preserves meeting record")
+    let retryDeleted = await failedVM.retry(id: failedMeeting.id)
+    check(!retryDeleted, "a pending deletion cannot enter processing or source retention")
     let recovered = TranscriberViewModel(capture: RecordingAudioCapture(directory: root),
         settings: AppSettings(keepAudioAfterSummary: true), meetingStore: cleanupStore)
-    check(recovered.meeting(id: failedMeeting.id)?.status == .summarized, "startup resumes pending cleanup using the saved summary")
-    check(recovered.meeting(id: failedMeeting.id)?.pendingArtifactDeletion.isEmpty == true, "recovered cleanup clears its persisted decision")
+    check(recovered.meeting(id: failedMeeting.id) == nil, "startup resumes an explicitly requested deletion")
+    check(cleanupStore.load().isEmpty, "recovered deletion removes its persisted library record")
     check(failedRecord.audioFileURLs.values.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) }, "recovery honors the original deletion decision after settings change")
 
     let badStore = root.appendingPathComponent("history")
@@ -2342,6 +2427,137 @@ do {
     await secondStop.value
     check(vm.meeting(id: first.id)?.status == .summarized && vm.meeting(id: second.id)?.status == .summarized, "both back-to-back meetings finish without losing a session")
 }
+
+section("discrete meeting content: migration, recovery and retention")
+do {
+    let fm = FileManager.default
+    let root = suiteRoot.appendingPathComponent("discrete-\(UUID().uuidString)")
+    defer { try? fm.removeItem(at: root) }
+    try fm.createDirectory(at: root, withIntermediateDirectories: true)
+    let indexURL = root.appendingPathComponent("meetings.json")
+    var meeting = Meeting(title: "Names / remain safe", status: .summarized, startedAt: Date(timeIntervalSince1970: 1_790_000_000),
+        createdAt: t0, lastActivityAt: t0,
+        transcript: [TranscriptSegment(speaker: "Speaker 1", text: "A distinctive transcript.", startOffset: 2, endOffset: 4)],
+        summary: MeetingSummary(overall: "A distinctive summary.", keyPoints: ["A point"], decisions: ["A decision"], actionItems: ["An action"]))
+    let stem = RecordingsDirectory.fileStem(for: meeting)
+    let audio = root.appendingPathComponent("recordings/\(stem)/mic.caf")
+    try fm.createDirectory(at: audio.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try Data("original audio".utf8).write(to: audio)
+    meeting.audioFileURLs = [.mic: audio]
+    let legacy = try JSONEncoder().encode([meeting])
+    try legacy.write(to: indexURL)
+    try legacy.write(to: indexURL.appendingPathExtension("bak"))
+    let store = MeetingStore(url: indexURL)
+    let migrated = store.load().first!
+    check(store.lastError == nil && migrated.summary == meeting.summary && migrated.transcript == meeting.transcript,
+          "legacy migration preserves all structured content and segment timing")
+    let files = migrated.contentFiles!
+    check(files.stem == stem && files.summaryMarkdown?.lastPathComponent == stem + ".md" && files.transcriptText?.lastPathComponent == stem + ".txt",
+          "content uses the existing recording stem in separate summary/transcript folders")
+    for file in [indexURL, indexURL.appendingPathExtension("bak")] {
+        let rows = try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as! [[String: Any]]
+        check(rows[0]["summary"] == nil && rows[0]["transcript"] == nil && rows[0]["contentFiles"] != nil,
+              "library and recovery index contain references without meeting content")
+    }
+    check(try String(contentsOf: files.summaryMarkdown!, encoding: .utf8).contains("A distinctive summary."), "standalone Markdown summary is readable")
+    check(try String(contentsOf: files.transcriptText!, encoding: .utf8).contains("[Speaker 1] A distinctive transcript."), "standalone transcript has readable paragraphs and speaker labels")
+    check(try Data(contentsOf: audio) == Data("original audio".utf8), "migration leaves original audio intact")
+    var renamed = migrated
+    renamed.title = "Renamed"
+    check(store.save([renamed]) && store.load().first?.contentFiles?.stem == stem, "renaming preserves stable content filenames")
+    var changed = store.load().first!
+    changed.summary?.overall = "An updated summary."
+    changed.transcript[0].text = "An updated transcript."
+    check(store.save([changed]), "content revisions save successfully")
+    try Data("corrupt index".utf8).write(to: indexURL)
+    let recovered = MeetingStore(url: indexURL).load().first!
+    check(recovered.summary == meeting.summary && recovered.transcript == meeting.transcript,
+          "backup index recovers its matching prior content revisions")
+    let repaired = MeetingStore(url: indexURL)
+    _ = repaired.load()
+    check(repaired.save([recovered]), "recovered revision can repair the live library")
+    check(MeetingStore(url: indexURL).load().first?.summary == meeting.summary, "repaired library hydrates restored content")
+
+    // Fail after writing a summary payload, before committing its Markdown or
+    // index. Rollback must restore every changed content file.
+    let oldIndex = try Data(contentsOf: indexURL)
+    let oldJSON = try Data(contentsOf: files.summaryJSON!)
+    let oldMD = try Data(contentsOf: files.summaryMarkdown!)
+    try fm.removeItem(at: files.summaryMarkdown!)
+    try fm.createDirectory(at: files.summaryMarkdown!, withIntermediateDirectories: true)
+    var failing = repaired.load().first!
+    failing.summary?.overall = "This write must roll back."
+    check(!repaired.save([failing]), "content write failure rejects the entire library update")
+    check(try Data(contentsOf: indexURL) == oldIndex && Data(contentsOf: files.summaryJSON!) == oldJSON,
+          "failed save preserves both the prior index and prior summary payload")
+    try fm.removeItem(at: files.summaryMarkdown!)
+    try oldMD.write(to: files.summaryMarkdown!)
+
+    let cleanStore = MeetingStore(url: indexURL)
+    var retained = cleanStore.load().first!
+    var policySettings = AppSettings()
+    policySettings.keepAudioAfterSummary = true
+    let deletions = RetentionPolicy(settings: policySettings).artifactsToDelete(for: retained)
+    check(deletions.contains(files.transcriptJSON!) && deletions.contains(files.transcriptText!) &&
+          deletions.contains(files.transcriptJSON!.appendingPathExtension("bak")), "retention covers transcript text, timings and recovery copy")
+    retained.transcript = []
+    retained.pendingArtifactDeletion = deletions
+    check(cleanStore.save([retained]), "summary and pending retention become durable before deleting transcripts")
+    try MeetingArtifacts().remove(deletions)
+    check(MeetingStore(url: indexURL).load().first?.summary == meeting.summary &&
+          MeetingStore(url: indexURL.appendingPathExtension("bak")).load().first?.transcript.isEmpty == true,
+          "retention leaves recoverable summaries and no transcript references in either index")
+    check(fm.fileExists(atPath: files.summaryMarkdown!.path) && !fm.fileExists(atPath: files.transcriptJSON!.path), "retention keeps standalone summaries and removes transcript files")
+
+    // Explicit deletion journals intent before removing artifacts and sanitizes
+    // both metadata indexes, so deleted content cannot be resurrected.
+    let vm = TranscriberViewModel(capture: RecordingAudioCapture(directory: suiteRecordings), meetingStore: cleanStore)
+    vm.delete(id: retained.id)
+    check(vm.meetings.isEmpty && cleanStore.load().isEmpty, "Delete removes the meeting and its metadata")
+    check(files.allURLs.allSatisfy { !fm.fileExists(atPath: $0.path) } && !fm.fileExists(atPath: audio.path), "Delete removes every per-meeting content file and retained audio")
+
+    // A failed migration must leave the old inline library byte-for-byte safe.
+    let blocked = root.appendingPathComponent("blocked")
+    try fm.createDirectory(at: blocked, withIntermediateDirectories: true)
+    let blockedIndex = blocked.appendingPathComponent("meetings.json")
+    try legacy.write(to: blockedIndex)
+    try Data("blocks summary folder".utf8).write(to: blocked.appendingPathComponent("summaries"))
+    let blockedStore = MeetingStore(url: blockedIndex)
+    check(blockedStore.load().first?.summary == meeting.summary && blockedStore.lastError != nil,
+          "failed migration still exposes the existing in-memory summary with an error")
+    check(try Data(contentsOf: blockedIndex) == legacy, "failed migration never replaces the original inline library")
+
+    final class SweepProbe: MeetingArtifactManaging, @unchecked Sendable {
+        var swept = false
+        func sweep(liveIDs: Set<UUID>) -> [URL] { swept = true; return [] }
+        func remove(_ urls: [URL]) throws {}
+        func removeEmptyDirectory(for id: UUID) throws {}
+        func discard(_ meeting: Meeting) throws {}
+    }
+    let probe = SweepProbe()
+    let blockedVM = TranscriberViewModel(capture: RecordingAudioCapture(directory: suiteRecordings), meetingStore: blockedStore, artifacts: probe)
+    check(!probe.swept && blockedVM.processingError != nil, "failed migration pauses startup cleanup and exposes its error")
+    let corruptURL = root.appendingPathComponent("corrupt/meetings.json")
+    try fm.createDirectory(at: corruptURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+    let corruptBytes = Data("unreadable library".utf8)
+    try corruptBytes.write(to: corruptURL)
+    let corruptStore = MeetingStore(url: corruptURL)
+    _ = corruptStore.load()
+    check(try !corruptStore.save([]) && Data(contentsOf: corruptURL) == corruptBytes, "an unreadable library cannot be overwritten by an empty session")
+
+    // Unreadable content preserves metadata, references and source recordings.
+    let missingRoot = root.appendingPathComponent("missing")
+    let missingStore = MeetingStore(url: missingRoot.appendingPathComponent("meetings.json"))
+    check(missingStore.save([meeting]), "missing-file fixture is saved")
+    let missingFiles = missingStore.load().first!.contentFiles!
+    try fm.removeItem(at: missingFiles.summaryJSON!)
+    let missingReload = MeetingStore(url: missingStore.fileURL)
+    let missing = missingReload.load()
+    check(missing.count == 1 && missing[0].contentFiles == missingFiles && missingReload.lastError != nil,
+          "missing content preserves its library record and reports a recoverable error")
+    check(!missingReload.save(missing),
+          "unrelated saves cannot erase missing summary references")
+} catch { check(false, "discrete storage regressions: \(error)") }
 
 // MARK: - Report
 print("\n\(passed) passed, \(failed) failed")

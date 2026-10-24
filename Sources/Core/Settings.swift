@@ -322,10 +322,8 @@ public struct RetentionPolicy: Sendable {
             urls.append(contentsOf: meeting.audioFileURLs.values)
         }
         if !settings.keepTranscriptAfterSummary {
-            // The transcript is stored in meetings.json, not a separate file in
-            // the MVP — but if a transcript file was written, it lives next to
-            // the audio. We delete the per-meeting directory's transcript file
-            // if present; the engine also clears the in-memory transcript.
+            urls += (meeting.contentFiles?.transcriptURLs ?? []).flatMap { [$0, $0.appendingPathExtension("bak")] }
+            // Also clean the earlier experimental per-recording transcript.
             if let base = meeting.audioFileURLs.values.first?.deletingLastPathComponent() {
                 urls.append(base.appendingPathComponent("transcript.json"))
             }

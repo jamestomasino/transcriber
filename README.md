@@ -30,6 +30,9 @@ The summary is the only thing that sticks around. That's the point.
   Labels remain estimates; the app does not identify participants by name.
 - **A structured summary.** Overall, key points, decisions, and action items —
   not a wall of text.
+- **Transcript cleanup.** Consecutive speech from one speaker reads as
+  paragraphs. Replayed phrases at overlapping audio boundaries are removed
+  before summarization, while ordinary spoken repetition is preserved.
 - **Local by default.** Fresh installs use Whisper Large v3 for transcription
   and a quantized Qwen 3.5 4B model for summaries. Download about 4.2 GB once,
   then process meetings offline without an account or API key. Saved backend
@@ -140,8 +143,12 @@ rather than echoing the secret back.
   directory that outlived its meeting within the managed data folder.
 - **Opt in to keep more** if you want to: Settings → *Storage* → "Keep
   transcript after summary" / "Keep audio after summary."
-- **Your summaries persist** to `meetings.json` (with a one-generation backup
-  and a corrupt-file fallback), so they survive a relaunch.
+- **Your summaries persist** in individual dated Markdown files under `summaries/`,
+  with structured JSON sidecars. Retained transcripts live under `transcripts/`
+  as readable text plus JSON with speaker timings. All use the recordings’
+  `yyyyMMdd-HHmm-UUID` naming convention. `meetings.json` indexes metadata and file
+  references only, with a previous-generation backup. Existing libraries migrate
+  automatically on launch; a failed migration preserves the original library.
 - **Choose where data goes** in Settings → *Storage* → **Data location**. The
   first-run default is `~/Documents/Transcriber`; pick a folder or
   **Reset** to return to the default. Restart to use the chosen location.

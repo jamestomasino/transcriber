@@ -34,6 +34,39 @@ across concurrent meetings in one app process, and release model weights between
 stages. Whisper processes five-minute, overlapping PCM sections in memory, about
 19 MB of audio per section, without writing a prepared WAV.
 
+## Transcript cleanup
+
+After speaker matching, a deterministic Core cleanup compares recent segments
+from the same known speaker. It removes exact replayed wording only when
+overlapping timings or Whisper's section provenance support the match. Matches
+can span several short lines, and contained duplicates in older timestamp-sorted
+transcripts are handled conservatively. Whitespace, case and prose punctuation
+can vary; numeric tokens, unit case and mathematical/currency symbols remain
+distinct. Matches that would discard common negation context are rejected.
+It does not globally delete recurring phrases, rewrite names,
+infer missing speech or collapse all repeated words inside an utterance.
+
+The saved checkpoint keeps deduplicated small segments and their timing so
+speaker matching can still work at utterance granularity. Paragraph assembly
+then joins consecutive speech by the same known speaker across sentence stops,
+with at most a two-second gap, 1,200 characters and 60 seconds per block. Limits
+start another paragraph; they never truncate text. Speaker changes and unknown
+identities remain separate. Summaries receive these paragraphs, and transcript
+display/copy use the same cleanup. Summary retries clean old retained text;
+simply opening a meeting does not rewrite its stored transcript or summary.
+
+Whisper records optional audio-section origin metadata. Partial overlap removal
+advances the continuation past the covered interval and clears its raw replay
+origin, making repeated cleanup stable. Distinct text with fully overlapping
+timestamps is retained rather than discarded solely because of its time range.
+
+Validation: 470 Core assertions and media/cache checks pass. A read-only check
+of the retained 655-segment meeting removed 17 replayed words and produced 140
+readable paragraphs. Saved meeting data and audio were not modified. Regression
+fixtures cover multi-line overlap, deliberate repetition, changing speakers,
+uncertain identities, legacy decoding, idempotence, changed values/negations,
+unit case, currency/math symbols, paragraph limits and checkpoint/summary order.
+
 ## Domain vocabulary
 
 Large v3 is a general speech model. Add relevant names, organizations, products,

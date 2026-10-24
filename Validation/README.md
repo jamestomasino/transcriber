@@ -5,6 +5,11 @@ checks. No permissions, network access, provider keys, or user data are needed.
 All view-model tests use temporary recordings roots. In-memory stores do not
 write backing files.
 
+Storage checks migrate legacy inline libraries to dated summary/transcript files,
+verify metadata-only indexes, recover matching content revisions, roll back failed
+writes, and exercise retention and interrupted deletion. Migration/read failures
+pause automatic cleanup so source recordings remain available.
+
 The media checks create two tracks with sound in different halves, verify that
 both survive mixing, check temporary-file cleanup after success and failure,
 and verify compression for a single cloud-bound track. A 125-second audio fixture
@@ -90,6 +95,7 @@ bash Validation/run.sh models --whisper-only
 bash Validation/run.sh models --summary-only
 bash Validation/run.sh models --catalog       # public metadata only; no weights downloaded
 bash Validation/run.sh models --probe-current # switch-time synthetic check on the cached default
+bash Validation/run.sh models --inspect-cleanup <UUID> # read-only retained transcript cleanup statistics
 ```
 
 These checks download missing pinned public weights, then process synthetic
