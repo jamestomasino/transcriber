@@ -87,6 +87,74 @@ its summary. These are text regression checks, not an audio-grounded accuracy
 measurement or recovery of speech the decoder may have omitted.
 The expanded harness passes 512 assertions plus the real-media checks.
 
+## Background processing and resource control
+
+Automatic processing now admits one complete meeting at a time, including audio
+preparation. This deliberately uses FIFO meetings rather than interleaving stages:
+waiting recordings remain lightweight, the oldest admitted meeting can finish,
+and preparation cannot run ahead of inference. The separate native inference
+guard also serializes explicit model probes/replacement. Never acquire that guard
+recursively. Queued and interrupted jobs retain the model/provider and retention
+settings chosen when queued; ordinary backend failures clear that saved intent so
+Retry can use corrected settings. Transcribe again always creates a new request.
+
+Local transcription and speaker matching share one aligned managed mix. Missing
+source audio is rejected before model setup. The existing codec, sampling,
+Whisper model/search settings and summary model remain unchanged. Original audio
+is not deleted until the summary and cleanup decision are durable. Prepared mixes
+and speaker WAVs are removed on every exit and swept after interrupted execution.
+
+Whisper's native work runs on a GCD utility queue to avoid Swift waiter-priority
+escalation. Native helper processes use utility QoS and positive niceness. These
+are best-effort CPU scheduling controls, not GPU quotas. Normal capture and
+pressure deferral occurs at model-free stage boundaries, with checks repeated
+after preparation/asset setup and immediately before native model loading. Serious thermal or
+memory pressure defers new stages, with a 15-second cooldown after the last pressure observation before
+resuming. Low Power Mode briefly defers admission for 30 seconds without starving
+jobs indefinitely. Critical pressure cancels active work and requires explicit
+Resume; a checkpointed transcript can be reused, but interrupted inference is
+retried, not resumed at a decoder token. Native model probes also honor critical
+pressure. These initial policy intervals require workload validation before
+organization-wide rollout.
+
+The summary helper closes its lifetime pipe and asynchronously waits for the
+model and wrapper to exit. If needed, it sends TERM and then KILL to the recorded
+child while preserving the wrapper to reap it. Never terminate the waiting wrapper
+first: that can orphan a TERM-ignoring model. Unconfirmed teardown quarantines
+further native inference instead of loading another model alongside it.
+
+The queue UI distinguishes queued position, active processing and resource/capture
+deferral. Interrupted requests survive relaunch but do not execute automatically.
+Resume keeps their saved settings. Cancel pending processing discards that intent
+without deleting audio or summaries, allowing a fresh retry or model replacement.
+Model replacement is blocked while queued or interrupted requests reference weights.
+
+Summary sections use the pinned runtime's `/apply-template` and `/tokenize`
+endpoints to reserve space for instructions, output and a safety margin in the
+8,192-token context. Oversized sections split before generation; output-limit
+fallback remains bounded and preserves every section. Section combination is
+still deterministic, with no final synthesis call.
+
+For opted-in transcript retention, completed summary sections may be stored in
+`recordings/<stem>/summary-sections.json` after the transcript checkpoint. The
+path follows the retained source/content stem across timezone changes. This is
+meeting content, separate from model caches. Exact-input digests include ordered
+text, title, model hash, system/user prompts, schema and generation settings.
+Changed requests cannot reuse old entries. The file is bounded to 8 MiB / 256
+entries, contains notes and digest keys rather than a second transcript, survives
+ordinary summary failure/interrupted launch, and is removed on summary success,
+cancellation, meeting deletion or successful retention cleanup. Default retention
+uses memory only. Cancellation during critical pressure currently drops section
+results too; it can still reuse an opted-in transcript on Resume.
+
+Diagnostics keep at most 256 stage duration/token-count records in memory. There
+is no automatic upload or prompt/transcript logging. The explicit background
+benchmark uses cached models and public synthetic speech only; it also samples
+app/helper RSS, system swap, thermal state and main-actor dispatch delay. RSS can
+miss GPU allocations, system swap includes other apps, and dispatch delay is a
+proxy, not proof of browser/call responsiveness. Compare repeated runs on identical
+inputs, without compilation or other benchmarks running concurrently.
+
 ## Domain vocabulary
 
 Large v3 is a general speech model. Add relevant names, organizations, products,

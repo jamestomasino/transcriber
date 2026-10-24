@@ -44,7 +44,7 @@ public struct URLSessionModelDownloader: ModelDownloader {
 // the Core components stay pure and unit-testable.
 
 public enum ProcessorFactory {
-    public static func make(settings: AppSettings, http: (any HTTPClient)? = nil) -> any MeetingProcessor {
+    public static func make(settings: AppSettings, http: (any HTTPClient)? = nil, scheduling: BackgroundProcessingScheduler? = nil) -> any MeetingProcessor {
         // The real pipeline client: the URLSession client (generous timeout so
         // long meetings don't fail mid-upload) wrapped in the retrying
         // decorator, so a transient 429/5xx/network hiccup is retried instead
@@ -54,30 +54,32 @@ public enum ProcessorFactory {
         let diarizer: any Diarizer
         switch settings.transcriptionBackend {
         case .whisper:
-            transcriber = WhisperTranscriber(modelID: settings.whisperModel, vocabulary: settings.transcriptionVocabulary)
-            diarizer = LocalSpeakerDiarizer()
+            transcriber = WhisperTranscriber(modelID: settings.whisperModel, vocabulary: settings.transcriptionVocabulary, modelAdmission: { try await scheduling?.checkpoint() })
+            diarizer = LocalSpeakerDiarizer(modelAdmission: { try await scheduling?.checkpoint() })
         case .local:
             transcriber = LocalSpeechTranscriber()
-            diarizer = LocalSpeakerDiarizer()
+            diarizer = LocalSpeakerDiarizer(modelAdmission: { try await scheduling?.checkpoint() })
         case .deepgram:
             transcriber = DeepgramTranscriber(apiKey: { Keychain.get("deepgram_api_key") }, http: http)
             diarizer = IdentityDiarizer()
         }
-        let summarizer: any Summarizer = makeSummarizer(settings: settings, http: http)
+        let summarizer: any Summarizer = makeSummarizer(settings: settings, http: http, scheduling: scheduling)
         return PipelineProcessor(
-            transcriber: PreparingTranscriber(inner: transcriber, prepareSingleSource: settings.transcriptionBackend == .deepgram),
+            transcriber: settings.transcriptionBackend == .deepgram ? PreparingTranscriber(inner: transcriber, prepareSingleSource: true) : transcriber,
             diarizer: diarizer,
             summarizer: summarizer,
             language: settings.language,
-            speakerAttribution: settings.transcriptionBackend == .deepgram ? .provider : .voiceClustering
+            speakerAttribution: settings.transcriptionBackend == .deepgram ? .provider : .voiceClustering,
+            audioPreparer: settings.transcriptionBackend == .deepgram ? nil : SharedLocalAudioPreparation(),
+            stageAdmission: { try await scheduling?.checkpoint() }
         )
     }
 
-    public static func makeSummarizer(settings: AppSettings, http: (any HTTPClient)? = nil) -> any Summarizer {
+    public static func makeSummarizer(settings: AppSettings, http: (any HTTPClient)? = nil, scheduling: BackgroundProcessingScheduler? = nil) -> any Summarizer {
         let http = http ?? RetryingHTTPClient(inner: URLSessionHTTPClient())
         switch settings.summaryBackend {
         case .localModel:
-            return DownloadedModelSummarizer(modelID: settings.summaryModel)
+            return DownloadedModelSummarizer(modelID: settings.summaryModel, reuseSections: settings.keepTranscriptAfterSummary, modelAdmission: { try await scheduling?.checkpoint() })
         case .local:
             // On-device Apple Intelligence — no key, no network. The `http`
             // client is unused here; the model runs locally.

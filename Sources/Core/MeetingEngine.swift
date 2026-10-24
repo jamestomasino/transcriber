@@ -158,6 +158,11 @@ public final class MeetingEngine {
 
     /// Attach a transcript to a meeting (set by the view model after the
     /// transcribe stage, so the record is inspectable even before summarizing).
+    public func setProcessingRequest(id: UUID, request: ProcessingRequest?) {
+        guard let index = meetings.firstIndex(where: { $0.id == id }) else { return }
+        meetings[index].processingRequest = request
+    }
+
     public func setTranscript(id: UUID, segments: [TranscriptSegment], attribution: SpeakerAttribution? = nil, now: Date? = nil) {
         let t = now ?? clock.now()
         guard let idx = index(of: id) else { return }

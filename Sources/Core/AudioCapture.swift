@@ -19,6 +19,7 @@ public struct CapturedAudio: Equatable, Sendable {
     public static let preparedFileName = "mixed.m4a"
     public static let speechSectionFileName = "speech-section.caf"
     public static let speakerAudioFileName = "speaker-analysis.wav"
+    public static let summarySectionsFileName = "summary-sections.json"
     /// File URLs per source that actually captured something.
     public var fileURLs: [AudioSource: URL]
     public var startOffsets: [AudioSource: TimeInterval]
@@ -81,6 +82,18 @@ public enum RecordingsDirectory {
 
     public static func forMeeting(_ meeting: Meeting, timeZone: TimeZone = .current) -> URL {
         base().appendingPathComponent(fileStem(for: meeting, timeZone: timeZone), isDirectory: true)
+    }
+
+    /// Reuse the persisted/source stem, never recompute a retained job's path
+    /// from today's timezone. This file is meeting content, not a model asset.
+    public static func summarySectionsURL(for meeting: Meeting) -> URL {
+        let directory: URL
+        if let source = meeting.audioFileURLs.values.first {
+            directory = source.deletingLastPathComponent()
+        } else if let stem = meeting.contentFiles?.stem {
+            directory = base().appendingPathComponent(stem, isDirectory: true)
+        } else { directory = forMeeting(meeting) }
+        return directory.appendingPathComponent(CapturedAudio.summarySectionsFileName)
     }
 
     public static func fileStem(for meeting: Meeting, timeZone: TimeZone = .current) -> String {
@@ -340,6 +353,12 @@ public protocol MeetingArtifactManaging: Sendable {
     func remove(_ urls: [URL]) throws
     func removeEmptyDirectory(for id: UUID) throws
     func discard(_ meeting: Meeting) throws
+}
+
+public extension MeetingArtifactManaging {
+    func removeSummarySections(for meeting: Meeting) throws {
+        try remove([RecordingsDirectory.summarySectionsURL(for: meeting)])
+    }
 }
 
 public struct MeetingArtifacts: MeetingArtifactManaging {

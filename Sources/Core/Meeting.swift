@@ -26,6 +26,16 @@ public enum SpeakerAttribution: String, Codable, Sendable {
     case provider
 }
 
+/// Saved intent for queued/interrupted work; no credentials or content.
+public struct ProcessingRequest: Codable, Equatable, Sendable {
+    public var settings: AppSettings
+    public var reuseTranscript: Bool
+    public var speakerOnly: Bool
+    public init(settings: AppSettings, reuseTranscript: Bool, speakerOnly: Bool = false) {
+        self.settings = settings; self.reuseTranscript = reuseTranscript; self.speakerOnly = speakerOnly
+    }
+}
+
 /// One attributed utterance in a transcript.
 public struct TranscriptSegment: Codable, Equatable, Sendable {
     public var speaker: String
@@ -183,6 +193,7 @@ public struct Meeting: Codable, Equatable, Identifiable, Sendable {
     public var pendingArtifactDeletion: [URL]
     public var contentFiles: MeetingContentFiles?
     public var deletionPending: Bool
+    public var processingRequest: ProcessingRequest?
 
     public init(
         id: UUID = UUID(),
@@ -202,7 +213,8 @@ public struct Meeting: Codable, Equatable, Identifiable, Sendable {
         failureReason: String? = nil,
         pendingArtifactDeletion: [URL] = [],
         contentFiles: MeetingContentFiles? = nil,
-        deletionPending: Bool = false
+        deletionPending: Bool = false,
+        processingRequest: ProcessingRequest? = nil
     ) {
         self.id = id
         self.title = title
@@ -222,12 +234,13 @@ public struct Meeting: Codable, Equatable, Identifiable, Sendable {
         self.pendingArtifactDeletion = pendingArtifactDeletion
         self.contentFiles = contentFiles
         self.deletionPending = deletionPending
+        self.processingRequest = processingRequest
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, title, status, startedAt, stoppedAt, duration, createdAt, lastActivityAt
         case audioFileURLs, audioStartOffsets, transcript, speakerCount, summary, failureReason, pendingArtifactDeletion
-        case speakerAttribution, contentFiles, deletionPending
+        case speakerAttribution, contentFiles, deletionPending, processingRequest
     }
 
     public init(from decoder: Decoder) throws {
@@ -250,6 +263,7 @@ public struct Meeting: Codable, Equatable, Identifiable, Sendable {
         pendingArtifactDeletion = try d.decodeIfPresent([URL].self, forKey: .pendingArtifactDeletion) ?? []
         contentFiles = try d.decodeIfPresent(MeetingContentFiles.self, forKey: .contentFiles)
         deletionPending = try d.decodeIfPresent(Bool.self, forKey: .deletionPending) ?? false
+        processingRequest = try d.decodeIfPresent(ProcessingRequest.self, forKey: .processingRequest)
     }
 }
 

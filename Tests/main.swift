@@ -828,7 +828,7 @@ do {
 
     // Keep original transcript + audio; the derived mix is always deleted.
     let keepAll = RetentionPolicy(settings: AppSettings(keepTranscriptAfterSummary: true, keepAudioAfterSummary: true))
-    check(Set(keepAll.artifactsToDelete(for: meeting)) == Set([dir.appendingPathComponent(CapturedAudio.preparedFileName), dir.appendingPathComponent(CapturedAudio.speechSectionFileName), dir.appendingPathComponent(CapturedAudio.speakerAudioFileName)]), "keep-all retains originals but deletes transient mixes, speech sections and speaker analysis audio")
+    check(Set(keepAll.artifactsToDelete(for: meeting)) == Set([dir.appendingPathComponent(CapturedAudio.preparedFileName), dir.appendingPathComponent(CapturedAudio.speechSectionFileName), dir.appendingPathComponent(CapturedAudio.speakerAudioFileName), dir.appendingPathComponent(CapturedAudio.summarySectionsFileName)]), "keep-all retains originals but deletes derived audio and partial summary checkpoints")
     check(keepAll.keepTranscript && keepAll.keepAudio, "keep-all flags are set")
 } catch {
     check(false, "retention: \(error)")
@@ -2607,6 +2607,204 @@ do {
     check(!missingReload.save(missing),
           "unrelated saves cannot erase missing summary references")
 } catch { check(false, "discrete storage regressions: \(error)") }
+
+section("background admission, pressure and recoverable queue intent")
+final class WorkStateProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var states: [ProcessingWorkState] = []
+    func add(_ state: ProcessingWorkState) { lock.withLock { states.append(state) } }
+    func contains(_ state: ProcessingWorkState) -> Bool { lock.withLock { states.contains(state) } }
+    var last: ProcessingWorkState? { lock.withLock { states.last } }
+}
+actor BackgroundTestGate {
+    var entered = false
+    private var continuation: CheckedContinuation<Void, Never>?
+    func hold() async { entered = true; await withCheckedContinuation { continuation = $0 } }
+    func release() { continuation?.resume(); continuation = nil }
+}
+func eventually(_ condition: () async -> Bool) async -> Bool {
+    for _ in 0..<10_000 {
+        if await condition() { return true }
+        await Task.yield()
+    }
+    return false
+}
+do {
+    let scheduling = BackgroundProcessingScheduler()
+    let gate = BackgroundTestGate(), firstState = WorkStateProbe(), secondState = WorkStateProbe()
+    let first = Task { try await scheduling.run(id: UUID(), report: { firstState.add($0) }) { await gate.hold(); return 1 } }
+    let entered = await eventually { await gate.entered }
+    check(entered, "the first background meeting is admitted")
+    let second = Task { try await scheduling.run(id: UUID(), report: { secondState.add($0) }) { 2 } }
+    let queued = await eventually { secondState.contains(.queued(position: 1)) }
+    check(queued && !secondState.contains(.running), "a second meeting waits before heavy preparation can start")
+    second.cancel()
+    do { _ = try await second.value; check(false, "cancelled queued work must not execute") }
+    catch is CancellationError { check(true, "queued cancellation returns while the first meeting remains active") }
+    await gate.release()
+    check(try await first.value == 1, "queued cancellation preserves the active meeting")
+
+    let blocked = WorkStateProbe()
+    await scheduling.setRecording(true)
+    let afterRecording = Task { try await scheduling.run(id: UUID(), report: { blocked.add($0) }) { 3 } }
+    let captureDeferred = await eventually { blocked.contains(.deferred(reason: "a recording is in progress")) }
+    check(captureDeferred && !blocked.contains(.running), "capture defers admission rather than competing with preparation")
+    await scheduling.setRecording(false)
+    check(try await afterRecording.value == 3, "stopping capture resumes admitted work")
+
+    let boundaryGate = BackgroundTestGate(), boundaryState = WorkStateProbe()
+    let atBoundary = Task { try await scheduling.run(id: UUID(), report: { boundaryState.add($0) }) {
+        await boundaryGate.hold(); try await scheduling.checkpoint(); return 4
+    } }
+    _ = await eventually { await boundaryGate.entered }
+    await scheduling.setRecording(true)
+    await boundaryGate.release()
+    let boundaryDeferred = await eventually { boundaryState.contains(.deferred(reason: "a recording is in progress")) }
+    check(boundaryDeferred, "an active meeting yields at the next model-free stage boundary")
+    await scheduling.setRecording(false)
+    check(try await atBoundary.value == 4, "a deferred stage continues without retranscribing earlier stages")
+
+    let time = ManualClock(instant: t0)
+    let pressure = BackgroundProcessingScheduler(recoverySeconds: 15, now: { time.now().timeIntervalSince1970 })
+    await pressure.updateConditions(BackgroundConditions(memory: .warning))
+    let state = WorkStateProbe()
+    let job = Task { try await pressure.run(id: UUID(), report: { state.add($0) }) { 5 } }
+    _ = await eventually { state.last != nil }
+    await pressure.updateConditions(BackgroundConditions())
+    check(!state.contains(.running), "resource recovery uses hysteresis instead of immediate restart")
+    time.advance(16)
+    await pressure.updateConditions(BackgroundConditions())
+    check(try await job.value == 5, "sustained normal pressure resumes deferred work")
+
+    let running = WorkStateProbe()
+    let criticalJob = Task { try await pressure.run(id: UUID(), report: { running.add($0) }) {
+        try await Task.sleep(nanoseconds: 60_000_000_000); return 6
+    } }
+    _ = await eventually { running.contains(.running) }
+    await pressure.updateConditions(BackgroundConditions(memory: .critical))
+    do { _ = try await criticalJob.value; check(false, "critical pressure must interrupt active processing") }
+    catch is ProcessingResourceInterruption { check(true, "critical pressure cancels active work with a recoverable resource reason") }
+
+    let low = BackgroundProcessingScheduler(now: { time.now().timeIntervalSince1970 })
+    await low.updateConditions(BackgroundConditions(lowPower: true))
+    let lowState = WorkStateProbe()
+    let lowJob = Task { try await low.run(id: UUID(), report: { lowState.add($0) }) { 7 } }
+    _ = await eventually { lowState.last != nil }
+    check(!lowState.contains(.running), "Low Power Mode briefly defers automatic processing")
+    time.advance(31)
+    await low.updateConditions(BackgroundConditions(lowPower: true))
+    check(try await lowJob.value == 7, "Low Power Mode does not starve a pending meeting indefinitely")
+
+    let measurements = ProcessingMeasurements()
+    for _ in 0..<300 { await measurements.record("transcription", seconds: 1) }
+    let samples = await measurements.snapshot()
+    check(samples.count == 256, "performance diagnostics have a bounded in-memory ring")
+    var moved = Meeting(title: "Stable path", startedAt: t0, createdAt: t0, lastActivityAt: t0)
+    let originalFolder = suiteRecordings.appendingPathComponent("original-recording-stem")
+    moved.audioFileURLs = [.mic: originalFolder.appendingPathComponent("mic.wav")]
+    check(RecordingsDirectory.summarySectionsURL(for: moved).deletingLastPathComponent().path == originalFolder.path,
+          "section checkpoints follow the retained source folder instead of recomputing its timezone prefix")
+    let encoded = try JSONSerialization.jsonObject(with: JSONEncoder().encode(samples)) as! [[String: Any]]
+    check(Set(encoded[0].keys) == ["stage", "seconds"], "diagnostic records contain only numeric measurements and stage names")
+
+    var pending = Meeting(title: "Interrupted", status: .processing, startedAt: t0, createdAt: t0, lastActivityAt: t0)
+    var chosen = AppSettings(); chosen.whisperModel = "whisper-large-v3-turbo-q5_0"
+    pending.processingRequest = ProcessingRequest(settings: chosen, reuseTranscript: false)
+    let store = MeetingStore.inMemory(initial: [pending])
+    let processor = FakeProcessor()
+    let resumed = TranscriberViewModel(capture: RecordingAudioCapture(directory: suiteRoot), processor: processor, meetingStore: store)
+    check(resumed.meeting(id: pending.id)?.status == .failed && resumed.meeting(id: pending.id)?.processingRequest == pending.processingRequest,
+          "relaunch preserves queued model/settings intent but requires explicit Resume")
+    check(processor.runs == 0, "relaunch never starts processing or downloads automatically")
+    check(!resumed.canReplaceLocalModel, "interrupted queue intent protects the selected weights from replacement")
+    let completed = await resumed.retry(id: pending.id)
+    check(completed && resumed.meeting(id: pending.id)?.processingRequest == nil, "successful resume clears saved queue intent")
+    let cancelledIntent = TranscriberViewModel(capture: RecordingAudioCapture(directory: suiteRoot), processor: processor,
+        meetingStore: .inMemory(initial: [pending]))
+    let partialNotes = RecordingsDirectory.summarySectionsURL(for: pending)
+    try FileManager.default.createDirectory(at: partialNotes.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try Data("partial fixture notes".utf8).write(to: partialNotes)
+    cancelledIntent.cancelProcessing(id: pending.id)
+    check(!FileManager.default.fileExists(atPath: partialNotes.path), "cancelling interrupted work removes its partial summary notes")
+    check(cancelledIntent.meeting(id: pending.id)?.processingRequest == nil && cancelledIntent.canReplaceLocalModel,
+          "cancelling interrupted work releases model intent without deleting source content")
+} catch { check(false, "background processing: \(error)") }
+
+section("shared preparation ownership and summary context admission")
+final class PreparationProbe: PipelineAudioPreparing, Transcriber, AudioDiarizer, Summarizer, @unchecked Sendable {
+    var preparations = 0, cleanups = 0, admissions = 0
+    var transcribed: CapturedAudio?, matched: CapturedAudio?
+    var fail = false
+    let prepared = CapturedAudio(fileURLs: [.mic: URL(fileURLWithPath: "/isolated/prepared.m4a")])
+    func prepare(_ audio: CapturedAudio) async throws -> PreparedMeetingAudio {
+        preparations += 1
+        return PreparedMeetingAudio(audio: prepared, cleanup: { self.cleanups += 1 })
+    }
+    func transcribe(audio: CapturedAudio, language: String) async throws -> [TranscriptSegment] {
+        transcribed = audio
+        if fail { throw LLMError("Injected transcription failure") }
+        return [TranscriptSegment(speaker: "Alex", text: "Alex will send the report Friday.", startOffset: 0, endOffset: 3)]
+    }
+    func diarize(_ segments: [TranscriptSegment]) async throws -> [TranscriptSegment] { segments }
+    func diarize(_ segments: [TranscriptSegment], audio: CapturedAudio, report: @escaping @Sendable (ProcessingProgress) -> Void) async throws -> [TranscriptSegment] {
+        matched = audio; return segments
+    }
+    func summarize(segments: [TranscriptSegment], title: String) async throws -> MeetingSummary {
+        guard cleanups > 0 else { throw LLMError("Preparation must be released before summary") }
+        return MeetingSummary(overall: "Alex will send the report Friday.")
+    }
+}
+actor TokenSummaryHTTP: HTTPClient {
+    var calls = 0
+    func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+        calls += 1
+        let object: [String: Any] = ["choices": [["finish_reason": "stop", "message": ["content": "{\"overall\":\"The team discussed the report.\",\"key_points\":[],\"decisions\":[],\"action_items\":[]}"]]],
+            "usage": ["prompt_tokens": 1000, "completion_tokens": 30]]
+        return HTTPResponse(statusCode: 200, body: try JSONSerialization.data(withJSONObject: object))
+    }
+}
+do {
+    let probe = PreparationProbe()
+    let pipeline = PipelineProcessor(transcriber: probe, diarizer: probe, summarizer: probe,
+        audioPreparer: probe, stageAdmission: { probe.admissions += 1 })
+    var meeting = Meeting(title: "Shared preparation", startedAt: t0, createdAt: t0, lastActivityAt: t0)
+    let result = try await pipeline.process(meeting: meeting, audio: CapturedAudio(), report: { _ in })
+    check(probe.preparations == 1 && probe.cleanups == 1 && probe.transcribed == probe.matched && probe.matched == probe.prepared,
+          "transcription and acoustic matching share one preparation, released before summarization")
+    check(probe.admissions == 4, "preparation and each model-free stage boundary check background admission")
+    probe.fail = true
+    do { _ = try await pipeline.process(meeting: meeting, audio: CapturedAudio(), report: { _ in }); check(false, "injected preparation consumer failure") }
+    catch { check(probe.cleanups == 2, "failed transcription cleans its shared preparation") }
+    meeting.transcript = result.segments
+    _ = try await pipeline.process(meeting: meeting, audio: CapturedAudio(), report: { _ in })
+    check(probe.preparations == 2, "summary-only retries do not prepare or decode source audio")
+
+    let cancelledAfterPreparation = PreparationProbe()
+    let admissionRace = PipelineProcessor(transcriber: cancelledAfterPreparation, diarizer: cancelledAfterPreparation,
+        summarizer: cancelledAfterPreparation, audioPreparer: cancelledAfterPreparation, stageAdmission: {
+            cancelledAfterPreparation.admissions += 1
+            if cancelledAfterPreparation.admissions == 2 { throw CancellationError() }
+        })
+    do { _ = try await admissionRace.process(meeting: Meeting(title: "Capture won", startedAt: t0, createdAt: t0, lastActivityAt: t0), audio: CapturedAudio(), report: { _ in })
+        check(false, "admission lost after preparation must not start a recognizer")
+    } catch is CancellationError {
+        check(cancelledAfterPreparation.cleanups == 1 && cancelledAfterPreparation.transcribed == nil,
+              "losing admission during preparation cleans the mix before any recognizer starts")
+    }
+
+    let http = TokenSummaryHTTP()
+    let summarizer = LocalJSONSummarizer(model: "fixture", http: http, countTokens: { messages in
+        let prompt = messages.last!["content"]!
+        let source = prompt.components(separatedBy: "<transcript>\n").last!.components(separatedBy: "\n</transcript>").first!
+        return source.count + 500
+    })
+    _ = try await summarizer.summarize(segments: [TranscriptSegment(speaker: "Alex", text: String(repeating: "alpha ", count: 1000))], title: "Context")
+    let calls = await http.calls
+    check(calls >= 2, "token admission splits oversized inputs before wasting a generation or truncating source content")
+    let measurements = await ProcessingMeasurements.shared.snapshot()
+    check(measurements.contains { $0.stage == "summary.section" && $0.inputTokens == 1000 && $0.outputTokens == 30 },
+          "summary diagnostics capture actual runtime token usage without prompt text")
+} catch { check(false, "shared preparation/context: \(error)") }
 
 // MARK: - Report
 print("\n\(passed) passed, \(failed) failed")

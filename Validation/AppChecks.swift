@@ -7,6 +7,7 @@ import Darwin
 @main
 struct AppChecks {
     static func main() async throws {
+        setbuf(stdout, nil)
         if CommandLine.arguments.count == 5, CommandLine.arguments[1] == "--speaker-parent-fixture" {
             let executable = URL(fileURLWithPath: CommandLine.arguments[2])
             let wave = URL(fileURLWithPath: CommandLine.arguments[3])
@@ -288,10 +289,67 @@ struct AppChecks {
         }
         let childPID = Int32(try String(contentsOf: pidFile, encoding: .utf8))!
         let stopStarted = Date()
-        ownedServer.stop()
+        try await ownedServer.shutdown()
         precondition(Date().timeIntervalSince(stopStarted) < 2 && Darwin.kill(childPID, 0) != 0)
         precondition(!FileManager.default.fileExists(atPath: ownedServer.directory.path))
         print("✓ The local model child exits on parent-pipe EOF and its private socket folder is removed")
+
+        // A model ignoring TERM must be killed and reaped before admission
+        // releases. This fixture execs sleep, so it has no unowned descendants.
+        try "#!/bin/sh\nprintf '%s' \"$$\" > \"$TMPDIR/fixture-pid\"\ntrap '' TERM\nexec /bin/sleep 30\n".write(to: fakeRuntime, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: fakeRuntime.path)
+        let stubborn = try LocalSummaryServer(executable: fakeRuntime, model: root.appendingPathComponent("unused-model"))
+        let stubbornPIDFile = stubborn.directory.appendingPathComponent("fixture-pid")
+        for _ in 0..<100 {
+            if let value = try? String(contentsOf: stubbornPIDFile, encoding: .utf8), Int32(value.trimmingCharacters(in: .whitespacesAndNewlines)) != nil { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let stubbornPID = Int32(try String(contentsOf: stubbornPIDFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines))!
+        let shutdownStart = Date()
+        try await stubborn.shutdown()
+        precondition(Date().timeIntervalSince(shutdownStart) < 4 && Darwin.kill(stubbornPID, 0) != 0)
+        precondition(!FileManager.default.fileExists(atPath: stubborn.directory.path))
+        print("✓ A TERM-ignoring model is killed and reaped before the inference slot can be reused")
+
+        let quarantinedQueue = LocalInferenceQueue()
+        await quarantinedQueue.quarantine()
+        do { _ = try await quarantinedQueue.run { 1 }; preconditionFailure("Quarantined inference must stay blocked") }
+        catch is LocalInferenceError {}
+        print("✓ Unconfirmed helper shutdown blocks further local inference")
+        let pressureQueue = LocalInferenceQueue()
+        await pressureQueue.setCriticalPressure(true)
+        do { _ = try await pressureQueue.run { 1 }; preconditionFailure("Critical pressure must block native model admission") }
+        catch is ProcessingResourceInterruption {}
+        await pressureQueue.setCriticalPressure(false)
+        let recoveredValue = try await pressureQueue.run { 2 }
+        precondition(recoveredValue == 2)
+        print("✓ Native model admission also protects explicit model probes during critical pressure")
+
+
+        let checkpointURL = root.appendingPathComponent(CapturedAudio.summarySectionsFileName)
+        let section = [TranscriptSegment(speaker: "Alex", text: "Alex will send the checklist Friday.")]
+        let notes = MeetingSummary(overall: "Alex will send the checklist Friday.")
+        let key = try SummarySectionStore.key(modelHash: "model-a", title: "Fixture", segments: section, maximumOutputTokens: 3072)
+        let noRetention = SummarySectionStore(url: nil)
+        try noRetention.save(notes, key: key)
+        precondition(!FileManager.default.fileExists(atPath: checkpointURL.path))
+        let sectionStore = SummarySectionStore(url: checkpointURL)
+        try sectionStore.save(notes, key: key)
+        let reloadedSections = SummarySectionStore(url: checkpointURL)
+        precondition(reloadedSections.load(key, segments: section) == notes)
+        let otherKey = try SummarySectionStore.key(modelHash: "model-b", title: "Fixture", segments: section, maximumOutputTokens: 3072)
+        precondition(reloadedSections.load(otherKey, segments: section) == nil)
+        let changedKey = try SummarySectionStore.key(modelHash: "model-a", title: "Changed", segments: section, maximumOutputTokens: 3072)
+        precondition(reloadedSections.load(changedKey, segments: section) == nil)
+        let sectionHTTP = SectionSummaryHTTP()
+        let reusing = ReusingSectionSummarizer(inner: LocalJSONSummarizer(model: "fixture", http: sectionHTTP), cache: SummarySectionStore(url: nil), modelHash: "model-a")
+        _ = try await reusing.summarize(segments: section, title: "Fixture")
+        _ = try await reusing.summarize(segments: section, title: "Fixture")
+        let sectionCalls = await sectionHTTP.calls
+        precondition(sectionCalls == 1)
+        try reloadedSections.remove()
+        precondition(!FileManager.default.fileExists(atPath: checkpointURL.path))
+        print("✓ Summary sections reuse exact inputs, invalidate changed models/titles, and default retention writes no checkpoint")
 
         for chunked in [false, true] {
             let fixture = try SocketFixture(chunked: chunked)
@@ -311,6 +369,21 @@ struct AppChecks {
         await cancelledSocket.worker.value
         cancelledSocket.close()
         print("✓ Private model transport handles fixed and chunked responses, cancellation, and never resolves the URL host")
+
+        do {
+            _ = try await SharedLocalAudioPreparation().prepare(CapturedAudio(fileURLs: [.mic: root.appendingPathComponent("missing-source")]))
+            preconditionFailure("Missing audio must be rejected before downloading or loading a model")
+        } catch is LocalInferenceError {}
+        print("✓ Missing source audio fails preparation before model setup")
+
+        let sharedPreparation = try await SharedLocalAudioPreparation().prepare(CapturedAudio(fileURLs: [.mic: mic, .system: system]))
+        let sharedMix = sharedPreparation.audio.mic!
+        let sharedLevels = try halfLevels(sharedMix)
+        precondition(sharedLevels.0 > 0.05 && sharedLevels.1 > 0.05)
+        try sharedPreparation.cleanup()
+        precondition(!FileManager.default.fileExists(atPath: sharedMix.path))
+        precondition(FileManager.default.fileExists(atPath: mic.path) && FileManager.default.fileExists(atPath: system.path))
+        print("✓ Shared local preparation retains both sources and removes only the derived mix")
 
         let mixed = root.appendingPathComponent("mixed.m4a")
         try await AudioPreparation.mix([mic, system], to: mixed)
@@ -455,5 +528,14 @@ private struct WaitingFixtureDownloader: ModelDownloader {
         await gate.hold()
         try data.write(to: destination)
         report(1)
+    }
+}
+
+private actor SectionSummaryHTTP: HTTPClient {
+    var calls = 0
+    func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+        calls += 1
+        let object: [String: Any] = ["choices": [["finish_reason": "stop", "message": ["content": "{\"overall\":\"Alex will send the checklist Friday.\",\"key_points\":[],\"decisions\":[],\"action_items\":[]}"]]]]
+        return HTTPResponse(statusCode: 200, body: try JSONSerialization.data(withJSONObject: object))
     }
 }

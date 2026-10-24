@@ -196,9 +196,13 @@ struct MeetingDetailView: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text(live?.status == .recording
                  ? "Recording — stop the meeting to generate a summary."
-                 : (vm.progressByMeeting[meeting.id]?.stage.rawValue.capitalized ?? "Working on it") + "…")
+                 : processingDescription)
                 .font(.callout)
                 .foregroundStyle(.secondary)
+                if live?.processingRequest != nil, live?.status == .processing {
+                    Text("Uses the model and retention settings chosen when queued.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 if let progress = vm.progressByMeeting[meeting.id], progress.stage == .diarizing, progress.fraction > 0 {
                     ProgressView(value: progress.fraction)
                     Text("Matching voices: \(Int(progress.fraction * 100))%")
@@ -206,6 +210,11 @@ struct MeetingDetailView: View {
                 }
             }
         }
+    }
+
+    private var processingDescription: String {
+        if let state = vm.workByMeeting[meeting.id], state != .running { return state.description }
+        return (vm.progressByMeeting[meeting.id]?.stage.rawValue.capitalized ?? "Working on it") + "…"
     }
 
     private var emptyBody: some View {
@@ -227,6 +236,9 @@ struct MeetingDetailView: View {
             if live?.status == .processing {
                 Button("Cancel processing") { vm.cancelProcessing(id: meeting.id) }
             }
+            if live?.status == .failed, live?.processingRequest != nil {
+                Button("Cancel pending processing") { vm.cancelProcessing(id: meeting.id) }
+            }
             if live?.status == .recording {
                 Button("Stop recording") { vm.stop() }.disabled(vm.isStarting)
             }
@@ -235,7 +247,7 @@ struct MeetingDetailView: View {
                     retrying = true
                     Task { await vm.retry(id: meeting.id); retrying = false }
                 } label: {
-                    Label(live?.transcript.isEmpty == false ? "Retry summary" : "Retry", systemImage: "arrow.clockwise")
+                    Label(live?.processingRequest != nil ? "Resume processing" : (live?.transcript.isEmpty == false ? "Retry summary" : "Retry"), systemImage: "arrow.clockwise")
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(retrying)

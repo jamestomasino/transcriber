@@ -99,14 +99,14 @@ struct SummaryModelScanner: Sendable {
 /// public text, never a real transcript, and leaves the current model untouched.
 enum SummaryModelProbe {
     static func check(option: SummaryModelOption, model: URL, runtime: URL) async throws {
-        let server = try LocalSummaryServer(executable: runtime, model: model)
-        defer { server.stop() }
-        try await server.waitUntilReady()
-        let summary = try await LocalJSONSummarizer(model: option.id, http: UnixModelHTTPClient(socket: server.socketURL), maximumOutputTokens: 512)
-            .summarize(segments: [TranscriptSegment(speaker: "Alex", text: "Alex will send the release checklist by Friday. The team agreed to launch on Monday after testing.")], title: "Local model check")
-        let actions = summary.actionItems.joined(separator: " ").lowercased()
-        guard !summary.overall.isEmpty, actions.contains("alex"), actions.contains("friday") else {
-            throw LocalInferenceError("This model did not pass the local meeting-notes check. Your current model was kept.")
+        try await LocalSummaryServer.withServer(executable: runtime, model: model) { server in
+            try await server.waitUntilReady()
+            let summary = try await LocalJSONSummarizer(model: option.id, http: UnixModelHTTPClient(socket: server.socketURL), maximumOutputTokens: 512)
+                .summarize(segments: [TranscriptSegment(speaker: "Alex", text: "Alex will send the release checklist by Friday. The team agreed to launch on Monday after testing.")], title: "Local model check")
+            let actions = summary.actionItems.joined(separator: " ").lowercased()
+            guard !summary.overall.isEmpty, actions.contains("alex"), actions.contains("friday") else {
+                throw LocalInferenceError("This model did not pass the local meeting-notes check. Your current model was kept.")
+            }
         }
     }
 }

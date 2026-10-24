@@ -72,6 +72,7 @@ extension LocalModelAssets {
 /// Real acoustic segmentation + embeddings + meeting-wide clustering. The
 /// native helper sees only a managed transient WAV, never a transcript or key.
 struct LocalSpeakerDiarizer: AudioDiarizer {
+    var modelAdmission: @Sendable () async throws -> Void = {}
     func diarize(_ segments: [TranscriptSegment]) async throws -> [TranscriptSegment] {
         throw LocalInferenceError("Voice matching requires the retained meeting audio.")
     }
@@ -79,8 +80,9 @@ struct LocalSpeakerDiarizer: AudioDiarizer {
     func diarize(_ segments: [TranscriptSegment], audio: CapturedAudio,
                  report: @escaping @Sendable (ProcessingProgress) -> Void) async throws -> [TranscriptSegment] {
         guard !segments.isEmpty else { return [] }
+        let assets = try await SpeakerAssets.prepare()
         return try await LocalInferenceQueue.shared.run {
-            let assets = try await SpeakerAssets.prepare()
+            try await modelAdmission()
             let files = [AudioSource.mic, .system].compactMap { audio.fileURLs[$0] }
             guard let first = files.first else { throw LocalInferenceError("Retained audio is required to update speaker labels.") }
             let folder = first.deletingLastPathComponent()
@@ -97,9 +99,10 @@ struct LocalSpeakerDiarizer: AudioDiarizer {
                 try await AudioPreparation.mix(files, to: mixed, offsets: offsets)
                 input = mixed
             } else { input = first }
-            let preparation = Task.detached(priority: .userInitiated) { try Self.prepareWave(input: input, output: wave) }
+            let preparation = Task.detached(priority: .utility) { try Self.prepareWave(input: input, output: wave) }
             try await withTaskCancellationHandler { try await preparation.value } onCancel: { preparation.cancel() }
             try Task.checkCancellation()
+            try await modelAdmission()
             let output = try await SpeakerAnalysisProcess().run(assets: assets, wave: wave, report: report)
             let turns = try Self.parse(output)
             let labeled = SpeakerAlignment.label(segments, turns: turns)
@@ -152,7 +155,7 @@ final class SpeakerAnalysisProcess: @unchecked Sendable {
     func run(assets: SpeakerAssets, wave: URL,
              report: @escaping @Sendable (ProcessingProgress) -> Void) async throws -> String {
         try await withTaskCancellationHandler {
-            try await Task.detached(priority: .userInitiated) { try self.execute(assets: assets, wave: wave, report: report) }.value
+            try await Task.detached(priority: .utility) { try self.execute(assets: assets, wave: wave, report: report) }.value
         } onCancel: { self.cancel() }
     }
     private func cancel() {
@@ -162,9 +165,10 @@ final class SpeakerAnalysisProcess: @unchecked Sendable {
     private func execute(assets: SpeakerAssets, wave: URL,
                          report: @escaping @Sendable (ProcessingProgress) -> Void) throws -> String {
         let process = Process(), input = Pipe(), output = Pipe(), progress = Pipe()
+        process.qualityOfService = .utility
         process.executableURL = URL(fileURLWithPath: "/bin/sh")
         process.arguments = ["-c", "umask 077; exec 3<&0; \"$@\" </dev/null & child=$!; (IFS= read -r stop <&3; kill \"$child\" 2>/dev/null) & watcher=$!; trap 'kill \"$child\" \"$watcher\" 2>/dev/null; wait \"$child\" \"$watcher\" 2>/dev/null' EXIT; trap 'exit 130' INT TERM; wait \"$child\"; result=$?; kill \"$watcher\" 2>/dev/null; wait \"$watcher\" 2>/dev/null; exit \"$result\"", "speaker-model",
-            assets.executable.path, "--segmentation.pyannote-model=\(assets.segmentation.path)",
+            "/usr/bin/nice", "-n", "10", assets.executable.path, "--segmentation.pyannote-model=\(assets.segmentation.path)",
             "--embedding.model=\(assets.embedding.path)", "--embedding.num-threads=2", "--segmentation.num-threads=2",
             "--clustering.num-clusters=-1",
             "--clustering.cluster-threshold=0.8", wave.path]

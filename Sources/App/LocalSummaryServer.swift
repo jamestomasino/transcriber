@@ -13,17 +13,19 @@ final class LocalSummaryServer: @unchecked Sendable {
     private let input = Pipe()
     private var stopped = false
 
-    init(executable: URL, model: URL) throws {
+    init(executable: URL, model: URL, threads: Int = 4) throws {
+        guard (1...4).contains(threads) else { throw LocalInferenceError("Invalid local model thread limit.") }
         directory = URL(fileURLWithPath: "/private/tmp/transcriber-lm-\(UUID().uuidString.prefix(12))", isDirectory: true)
         socketURL = directory.appendingPathComponent("model.sock")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
         // EOF on this pipe also stops the child if the app crashes. All variable
         // arguments are passed as argv, never interpolated into shell code.
+        process.qualityOfService = .utility
         process.executableURL = URL(fileURLWithPath: "/bin/sh")
-        process.arguments = ["-c", "umask 077; \"$@\" </dev/null & child=$!; trap 'kill \"$child\" 2>/dev/null; wait \"$child\" 2>/dev/null' EXIT; trap 'exit 0' INT TERM; IFS= read -r stop; exit 0", "local-model",
-            executable.path, "--model", model.path, "--host", socketURL.path,
+        process.arguments = ["-c", "umask 077; \"$@\" </dev/null & child=$!; printf '%s\\n' \"$child\" > \"$TMPDIR/model.pid\"; trap 'kill \"$child\" 2>/dev/null; wait \"$child\" 2>/dev/null' EXIT; trap 'exit 0' INT TERM; IFS= read -r stop; exit 0", "local-model",
+            "/usr/bin/nice", "-n", "10", executable.path, "--model", model.path, "--host", socketURL.path,
             "--ctx-size", String(SummaryModelCatalog.contextTokens), "--parallel", "1",
-            "--batch-size", "256", "--ubatch-size", "128", "--threads", "4",
+            "--batch-size", "256", "--ubatch-size", "128", "--threads", String(threads),
             "--cache-ram", "0", "--no-cache-idle-slots", "--ctx-checkpoints", "0", "--no-context-shift",
             "--no-webui", "--no-slots", "--no-agent", "--no-ui-mcp-proxy", "--log-disable",
             "--reasoning-budget", "0", "--chat-template-kwargs", "{\"enable_thinking\":false}"]
@@ -46,41 +48,133 @@ final class LocalSummaryServer: @unchecked Sendable {
         }
         throw LocalInferenceError("The local summary model did not become ready. Check available memory and retry.")
     }
-    func stop() {
-        guard !stopped else { return }; stopped = true
-        try? input.fileHandleForWriting.close()
-        let deadline = Date().addingTimeInterval(3)
-        while process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.02) }
-        if process.isRunning { process.terminate() }
-        // The shell's EXIT trap reaps the model child on both EOF and SIGTERM.
-        try? FileManager.default.removeItem(at: directory)
+    func countTokens(messages: [[String: String]]) async throws -> Int {
+        let client = UnixModelHTTPClient(socket: socketURL)
+        func send(_ path: String, _ body: [String: Any]) async throws -> [String: Any] {
+            let response = try await client.send(HTTPRequest(url: URL(string: "http://localhost" + path)!,
+                headers: ["Content-Type": "application/json"], body: try JSONSerialization.data(withJSONObject: body)))
+            guard response.statusCode == 200, let object = try JSONSerialization.jsonObject(with: response.body) as? [String: Any] else {
+                throw LocalInferenceError("The local runtime could not check the summary context. Audio was kept.")
+            }
+            return object
+        }
+        let formatted = try await send("/apply-template", ["messages": messages, "chat_template_kwargs": ["enable_thinking": false]])
+        guard let prompt = formatted["prompt"] as? String else { throw LocalInferenceError("The summary chat template could not be checked.") }
+        let tokenized = try await send("/tokenize", ["content": prompt, "add_special": false, "parse_special": true])
+        guard let tokens = tokenized["tokens"] as? [Int] else { throw LocalInferenceError("The summary tokens could not be counted.") }
+        return tokens.count
     }
-    deinit { stop() }
+    /// Must finish before the inference guard releases its slot. Run cleanup
+    /// independently of caller cancellation, without blocking the main actor.
+    func shutdown() async throws {
+        let task = Task.detached(priority: .utility) { try await self.finishShutdown() }
+        do { try await task.value }
+        catch {
+            await LocalInferenceQueue.shared.quarantine()
+            throw error
+        }
+    }
+    private func finishShutdown() async throws {
+        guard !stopped else { return }
+        stopped = true
+        let start = ProcessInfo.processInfo.systemUptime
+        defer { Task { await ProcessingMeasurements.shared.record("helper.shutdown", seconds: ProcessInfo.processInfo.systemUptime - start) } }
+        // Capture the PID while the owning shell is alive; its EXIT trap reaps
+        // that child. Never signal an unowned process after the wrapper exits.
+        var child: Int32?
+        for _ in 0..<50 {
+            if let text = try? String(contentsOf: directory.appendingPathComponent("model.pid"), encoding: .utf8),
+               let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)), pid > 1 { child = pid; break }
+            if !process.isRunning { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        try? input.fileHandleForWriting.close()
+        func wait(_ seconds: Double) async throws -> Bool {
+            let deadline = ProcessInfo.processInfo.systemUptime + seconds
+            while process.isRunning && ProcessInfo.processInfo.systemUptime < deadline {
+                try await Task.sleep(nanoseconds: 20_000_000)
+            }
+            return !process.isRunning
+        }
+        if try await !wait(1) {
+            if let child, process.isRunning { Darwin.kill(child, SIGTERM) }
+            // Do not signal the shell while its EXIT trap is waiting: TERM
+            // can interrupt wait and orphan a TERM-ignoring model. Keep the
+            // owning shell alive until it reaps the child we just signaled.
+            if child == nil, process.isRunning { process.terminate() }
+            if try await !wait(1) {
+                if let child, process.isRunning { Darwin.kill(child, SIGKILL) }
+                _ = try await wait(1)
+            }
+        }
+        guard let child, !process.isRunning, Darwin.kill(child, 0) != 0, errno == ESRCH else {
+            throw LocalInferenceError("The previous summary model has not exited. Further local inference is blocked; restart Transcriber after the helper has stopped. Audio was kept.")
+        }
+        try FileManager.default.removeItem(at: directory)
+    }
+    static func withServer<T: Sendable>(executable: URL, model: URL, threads: Int = 4,
+                                         operation: (LocalSummaryServer) async throws -> T) async throws -> T {
+        let server = try LocalSummaryServer(executable: executable, model: model, threads: threads)
+        let result: Result<T, Error>
+        do { result = .success(try await operation(server)) }
+        catch { result = .failure(error) }
+        try await server.shutdown()
+        return try result.get()
+    }
+    deinit {
+        // Last-resort EOF guard; production callers always await withServer.
+        try? input.fileHandleForWriting.close()
+    }
+
 }
 
-struct DownloadedModelSummarizer: Summarizer {
+struct DownloadedModelSummarizer: MeetingSummarizer {
     let modelID: String
+    var reuseSections = false
+    var modelAdmission: @Sendable () async throws -> Void = {}
     func summarize(segments: [TranscriptSegment], title: String) async throws -> MeetingSummary {
+        try await summarize(segments: segments, title: title, meeting: nil)
+    }
+    func summarize(segments: [TranscriptSegment], title: String, meeting: Meeting) async throws -> MeetingSummary {
+        try await summarize(segments: segments, title: title, meeting: Optional(meeting))
+    }
+    private func summarize(segments: [TranscriptSegment], title: String, meeting: Meeting?) async throws -> MeetingSummary {
         guard ProcessInfo.processInfo.physicalMemory >= SummaryModelCatalog.minimumMemoryBytes else {
             throw LocalInferenceError("The downloadable summary model needs at least 8 GB of memory. Choose another backend in Settings.")
         }
-        return try await LocalInferenceQueue.shared.run {
-            let option = try await SummaryModelRegistry.shared.option(id: modelID)
-            guard SummaryModelFit.fits(option, memoryBytes: ProcessInfo.processInfo.physicalMemory) else {
-                throw LocalInferenceError("The selected summary model needs more memory than this Mac has. Choose a smaller model in Settings.")
+        let option = try await SummaryModelRegistry.shared.option(id: modelID)
+        guard SummaryModelFit.fits(option, memoryBytes: ProcessInfo.processInfo.physicalMemory) else {
+            throw LocalInferenceError("The selected summary model needs more memory than this Mac has. Choose a smaller model in Settings.")
+        }
+        // Download/verification does not occupy the native inference guard.
+        let model = try await ProcessingMeasurements.measure("summary.assets") { try await LocalModelAssets.shared.ensure(option.asset) }
+        let runtime = try await LocalModelAssets.shared.runtime(whisper: false)
+        let cacheURL = reuseSections ? meeting.map { RecordingsDirectory.summarySectionsURL(for: $0) } : nil
+        let cache = SummarySectionStore(url: cacheURL)
+        do {
+            let result = try await LocalInferenceQueue.shared.run {
+                try await modelAdmission()
+                return try await LocalSummaryServer.withServer(executable: runtime, model: model) { server in
+                    try await ProcessingMeasurements.measure("summary.modelLoad") { try await server.waitUntilReady() }
+                    let inner = LocalJSONSummarizer(model: modelID, http: UnixModelHTTPClient(socket: server.socketURL), countTokens: { try await server.countTokens(messages: $0) })
+                    let reusing = ReusingSectionSummarizer(inner: inner, cache: cache, modelHash: option.asset.sha256!)
+                    var summary = try await ChunkingSummarizer(inner: reusing, transcriptBudget: SummaryModelCatalog.transcriptBudget)
+                        .summarize(segments: segments, title: title)
+                    summary.model = option.asset.displayName
+                    return summary
+                }
             }
-            let model = try await LocalModelAssets.shared.ensure(option.asset)
-            let runtime = try await LocalModelAssets.shared.runtime(whisper: false)
-            let server = try LocalSummaryServer(executable: runtime, model: model)
-            defer { server.stop() }
-            try await server.waitUntilReady()
-            let inner = LocalJSONSummarizer(model: modelID, http: UnixModelHTTPClient(socket: server.socketURL))
-            var summary = try await ChunkingSummarizer(inner: inner, transcriptBudget: SummaryModelCatalog.transcriptBudget)
-                .summarize(segments: segments, title: title)
-            summary.model = option.asset.displayName
-            return summary
+            try Summary.validateDetail(result, segments: segments)
+            try cache.remove()
+            return result
+        } catch {
+            // Partial notes are useful after an ordinary failed opted-in retry;
+            // explicit cancellation and default retention leave no section file.
+            if error is CancellationError || Task.isCancelled || !reuseSections { try? cache.remove() }
+            throw error
         }
     }
+
 }
 
 /// Only the Unix socket is used; HTTPRequest.url supplies the route, not a
@@ -92,7 +186,7 @@ struct UnixModelHTTPClient: HTTPClient {
         let connection = UnixConnection()
         return try await withTaskCancellationHandler {
             do {
-                let response = try await Task.detached(priority: .userInitiated) { try connection.send(request, socket: socket, timeout: timeout) }.value
+                let response = try await Task.detached(priority: .utility) { try connection.send(request, socket: socket, timeout: timeout) }.value
                 try Task.checkCancellation()
                 return response
             } catch {

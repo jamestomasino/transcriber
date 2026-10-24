@@ -318,6 +318,7 @@ public struct RetentionPolicy: Sendable {
             urls.append(directory.appendingPathComponent(CapturedAudio.speechSectionFileName))
             urls.append(directory.appendingPathComponent(CapturedAudio.speakerAudioFileName))
         }
+        urls.append(RecordingsDirectory.summarySectionsURL(for: meeting))
         if !settings.keepAudioAfterSummary {
             urls.append(contentsOf: meeting.audioFileURLs.values)
         }

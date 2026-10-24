@@ -255,17 +255,41 @@ private final class AssetDownload: @unchecked Sendable {
 actor LocalInferenceQueue {
     static let shared = LocalInferenceQueue()
     private var busy = false
+    private var quarantined = false
+    private var criticalPressure = false
+    private var cancelActive: (@Sendable () -> Void)?
     private var order: [UUID] = []
     private var waiters: [UUID: CheckedContinuation<Void, Error>] = [:]
 
     func run<T: Sendable>(_ operation: @escaping @Sendable () async throws -> T) async throws -> T {
         try await acquire()
-        defer { release() }
+        defer { cancelActive = nil; release() }
         try Task.checkCancellation()
-        return try await operation()
+        guard !quarantined else { throw LocalInferenceError("The previous model did not exit; further inference is blocked.") }
+        guard !criticalPressure else { throw ProcessingResourceInterruption() }
+        let task = Task(priority: .utility) { try await operation() }
+        cancelActive = { task.cancel() }
+        return try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
+    }
+    func setCriticalPressure(_ value: Bool) {
+        criticalPressure = value
+        if value {
+            cancelActive?()
+            let error = LocalInferenceError("The Mac needs resources for other applications. Retry after resource pressure recovers.")
+            for waiter in waiters.values { waiter.resume(throwing: error) }
+            order = []; waiters = [:]
+        }
+    }
+    func quarantine() {
+        quarantined = true
+        let error = LocalInferenceError("Local inference is blocked because a previous model did not exit. Restart after the helper has stopped.")
+        for waiter in waiters.values { waiter.resume(throwing: error) }
+        order = []; waiters = [:]
     }
     private func acquire() async throws {
         try Task.checkCancellation()
+        guard !quarantined else { throw LocalInferenceError("Local inference is blocked until the previous helper has stopped and Transcriber is restarted.") }
+        guard !criticalPressure else { throw ProcessingResourceInterruption() }
         if !busy { busy = true; return }
         let id = UUID()
         try await withTaskCancellationHandler {

@@ -29,6 +29,28 @@ struct PreparingTranscriber: Transcriber {
     }
 }
 
+/// One aligned mix shared by local transcription and speaker analysis. Keep
+/// the existing codec until a measured PCM comparison justifies changing it.
+struct SharedLocalAudioPreparation: PipelineAudioPreparing {
+    func prepare(_ audio: CapturedAudio) async throws -> PreparedMeetingAudio {
+        let files = [AudioSource.mic, .system].compactMap { audio.fileURLs[$0] }
+        guard !files.isEmpty, files.allSatisfy({ FileManager.default.isReadableFile(atPath: $0.path) }) else {
+            throw LocalInferenceError("A saved recording is missing or unreadable. Restore the source files before resuming processing.")
+        }
+        guard files.count > 1 else { return PreparedMeetingAudio(audio: audio) }
+        let output = files[0].deletingLastPathComponent().appendingPathComponent(CapturedAudio.preparedFileName)
+        let cleanup: @Sendable () throws -> Void = {
+            if FileManager.default.fileExists(atPath: output.path) { try FileManager.default.removeItem(at: output) }
+        }
+        try cleanup()
+        do {
+            let offsets = Dictionary(audio.fileURLs.map { ($0.value, audio.startOffsets[$0.key] ?? 0) }, uniquingKeysWith: min)
+            try await AudioPreparation.mix(files, to: output, offsets: offsets)
+            return PreparedMeetingAudio(audio: CapturedAudio(fileURLs: [.mic: output]), cleanup: cleanup)
+        } catch { try? cleanup(); throw error }
+    }
+}
+
 enum AudioPreparation {
     static func mix(_ files: [URL], to output: URL, offsets: [URL: TimeInterval] = [:]) async throws {
         let composition = AVMutableComposition()

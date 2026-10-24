@@ -189,7 +189,7 @@ struct ContentView: View {
                                 Text(m.title).font(.headline)
                                 Text(m.startedAt, style: .date)
                                     .font(.caption).foregroundStyle(.secondary)
-                                Text(statusLabel(m.status))
+                                Text(vm.workByMeeting[m.id]?.description ?? (m.processingRequest != nil && m.status == .failed ? "Interrupted — select to resume" : statusLabel(m.status)))
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }

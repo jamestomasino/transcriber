@@ -1,4 +1,5 @@
 import Foundation
+import Dispatch
 import AVFoundation
 import Darwin
 import CWhisper
@@ -9,33 +10,46 @@ import TranscriberCore
 struct WhisperTranscriber: Transcriber {
     let modelID: String
     let vocabulary: String
+    var threadLimit: Int = 4
+    var modelAdmission: @Sendable () async throws -> Void = {}
     func transcribe(audio: CapturedAudio, language: String) async throws -> [TranscriptSegment] {
         guard let input = audio.mic ?? audio.system else { throw LocalInferenceError("No recording is available for Whisper.") }
         guard let spec = WhisperCatalog.selectable.first(where: { $0.id == modelID }) else {
             throw LocalInferenceError("Choose a supported Whisper model in Settings.")
         }
-        let model = try await LocalModelAssets.shared.ensure(spec)
+        let model = try await ProcessingMeasurements.measure("transcription.assets") { try await LocalModelAssets.shared.ensure(spec) }
         let runtime = try await LocalModelAssets.shared.runtime(whisper: true)
         return try await LocalInferenceQueue.shared.run {
+            try await modelAdmission()
             let cancellation = InferenceCancellation()
             return try await withTaskCancellationHandler {
-                try await Task.detached(priority: .userInitiated) {
-                    try Self.recognize(input: input, model: model, runtime: runtime, language: language, vocabulary: vocabulary, cancellation: cancellation)
-                }.value
+                // A GCD utility queue keeps native CPU work at utility QoS
+                // even when a higher-priority Swift task awaits its result.
+                try await withCheckedThrowingContinuation { continuation in
+                    DispatchQueue.global(qos: .utility).async {
+                        do {
+                            let result = try Self.recognize(input: input, model: model, runtime: runtime, language: language, vocabulary: vocabulary, threadLimit: threadLimit, cancellation: cancellation)
+                            continuation.resume(returning: result)
+                        } catch { continuation.resume(throwing: error) }
+                    }
+                }
             } onCancel: { cancellation.cancel() }
         }
     }
 
-    private static func recognize(input: URL, model: URL, runtime: URL, language: String, vocabulary: String, cancellation: InferenceCancellation) throws -> [TranscriptSegment] {
+    private static func recognize(input: URL, model: URL, runtime: URL, language: String, vocabulary: String, threadLimit: Int, cancellation: InferenceCancellation) throws -> [TranscriptSegment] {
         let api = try WhisperAPI(path: runtime.path)
         api.logSet({ _, _, _ in }, nil)
         try cancellation.check()
         var options = api.contextDefaults()
         options.use_gpu = true
         options.flash_attn = true
+        let modelLoadStarted = ProcessInfo.processInfo.systemUptime
         guard let context = model.path.withCString({ api.initialize($0, options) }) else {
             throw LocalInferenceError("Whisper could not load the selected model. Check available memory and download the model again if necessary. Audio was kept.")
         }
+        let modelLoadSeconds = ProcessInfo.processInfo.systemUptime - modelLoadStarted
+        Task { await ProcessingMeasurements.shared.record("transcription.modelLoad", seconds: modelLoadSeconds) }
         defer { api.free(context) }
         let file = try AVAudioFile(forReading: input)
         let rate = file.processingFormat.sampleRate
@@ -47,7 +61,7 @@ struct WhisperTranscriber: Transcriber {
             let samples = try WhisperAudio.readSection(file, seconds: 300)
             guard !samples.isEmpty else { break }
             var parameters = api.fullDefaults(WHISPER_SAMPLING_BEAM_SEARCH)
-            parameters.n_threads = Int32(min(4, max(2, ProcessInfo.processInfo.activeProcessorCount - 2)))
+            parameters.n_threads = Int32(min(max(1, min(4, threadLimit)), max(2, ProcessInfo.processInfo.activeProcessorCount - 2)))
             parameters.print_special = false; parameters.print_progress = false
             parameters.print_realtime = false; parameters.print_timestamps = false
             parameters.abort_callback = { pointer in

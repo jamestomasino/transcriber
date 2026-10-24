@@ -32,9 +32,11 @@ struct TranscriberApp: App {
         // Keep recordings and history on the same root for the whole session.
         // A location change in Settings takes effect on the next launch.
         RecordingsDirectory.baseDirectory = { StorageDirectory.recordingsURL(settings: settings) }
+        let scheduling = BackgroundProcessingScheduler()
+        BackgroundResourceMonitor.shared.start(scheduling: scheduling)
         let model = TranscriberViewModel(
             capture: AVAudioCapture(inputDeviceUID: { settingsStore.load().inputDeviceID }),
-            processor: ProcessorFactory.make(settings: settings),
+            processor: ProcessorFactory.make(settings: settings, scheduling: scheduling),
             settings: settings,
             settingsStore: settingsStore,
             meetingStore: meetingStore,
@@ -43,12 +45,13 @@ struct TranscriberApp: App {
             // switching backend / model in Settings takes effect on the next
             // meeting without a relaunch. Keys are read lazily from the Keychain
             // inside the factory, so Core stays pure.
-            processorFactory: { ProcessorFactory.make(settings: $0) },
+            processorFactory: { ProcessorFactory.make(settings: $0, scheduling: scheduling) },
             // A meeting started from the menu bar runs headless: post a banner
             // when it finishes (or fails) so the user knows the summary is
             // ready. The *decision* is pure Core; this poster owns the
             // platform call.
-            notifier: { note in MeetingNotifications.post(note) }
+            notifier: { note in MeetingNotifications.post(note) },
+            scheduling: scheduling
         )
         _vm = StateObject(wrappedValue: model)
         // Explicit recovery invocation; normal launches never retry automatically.

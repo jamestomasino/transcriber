@@ -113,6 +113,22 @@ public protocol Summarizer: Sendable {
     func summarize(segments: [TranscriptSegment], title: String) async throws -> MeetingSummary
 }
 
+/// Preparation ownership spans transcription and acoustic matching, then ends
+/// before summarization. Platform I/O stays behind these injected operations.
+public struct PreparedMeetingAudio: Sendable {
+    public let audio: CapturedAudio
+    public let cleanup: @Sendable () throws -> Void
+    public init(audio: CapturedAudio, cleanup: @escaping @Sendable () throws -> Void = {}) {
+        self.audio = audio; self.cleanup = cleanup
+    }
+}
+public protocol PipelineAudioPreparing: Sendable {
+    func prepare(_ audio: CapturedAudio) async throws -> PreparedMeetingAudio
+}
+public protocol MeetingSummarizer: Summarizer {
+    func summarize(segments: [TranscriptSegment], title: String, meeting: Meeting) async throws -> MeetingSummary
+}
+
 // MARK: - Composable pipeline processor
 //
 // Runs transcribe → diarize → summarize, reporting progress at each stage.
@@ -127,19 +143,25 @@ public struct PipelineProcessor: TranscriptCheckpointingProcessor, SpeakerReproc
     public let summarizer: any Summarizer
     public let language: String
     public let speakerAttribution: SpeakerAttribution
+    public let audioPreparer: (any PipelineAudioPreparing)?
+    public let stageAdmission: @Sendable () async throws -> Void
 
     public init(
         transcriber: any Transcriber,
         diarizer: any Diarizer,
         summarizer: any Summarizer,
         language: String = "",
-        speakerAttribution: SpeakerAttribution = .unverified
+        speakerAttribution: SpeakerAttribution = .unverified,
+        audioPreparer: (any PipelineAudioPreparing)? = nil,
+        stageAdmission: @escaping @Sendable () async throws -> Void = {}
     ) {
         self.transcriber = transcriber
         self.diarizer = diarizer
         self.summarizer = summarizer
         self.language = language
         self.speakerAttribution = speakerAttribution
+        self.audioPreparer = audioPreparer
+        self.stageAdmission = stageAdmission
     }
 
     public func process(
@@ -162,31 +184,50 @@ public struct PipelineProcessor: TranscriptCheckpointingProcessor, SpeakerReproc
             // summary stage rather than repeat a lengthy transcription.
             segments = meeting.transcript
         } else {
-            report(ProcessingProgress(stage: .transcribing, fraction: 0))
-            let raw = try await transcriber.transcribe(audio: audio, language: language)
+            try await stageAdmission()
+            let prepared = try await ProcessingMeasurements.measure("audio.preparation") {
+                try await audioPreparer?.prepare(audio) ?? PreparedMeetingAudio(audio: audio)
+            }
+            do {
+                // A new capture can begin while preparation is in flight.
+                try await stageAdmission()
+                report(ProcessingProgress(stage: .transcribing, fraction: 0))
+                let raw = try await ProcessingMeasurements.measure("transcription") {
+                    try await transcriber.transcribe(audio: prepared.audio, language: language)
+                }
 
-            guard raw.contains(where: { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else {
-                throw LLMError("No speech was recognized. Audio was kept; check the sources and language in Settings, then retry.")
-            }
-            // A recognizer can finish successfully after capturing only a fragment.
-            // Do not turn a few words from a long recording into a destructive success.
-            let wordCount = raw.reduce(0) { $0 + $1.text.split(whereSeparator: { $0.isWhitespace }).count }
-            if meeting.duration >= 15 * 60 && wordCount < 100 {
-                throw LLMError("Very little speech was recognized for this long recording. Audio was kept; check your audio sources and transcription backend in Settings, then retry.")
-            }
-            report(ProcessingProgress(stage: .diarizing, fraction: 0))
-            if let acoustic = diarizer as? any AudioDiarizer {
-                segments = try await acoustic.diarize(raw, audio: audio, report: report)
-            } else {
-                segments = try await diarizer.diarize(raw)
-            }
-
+                guard raw.contains(where: { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else {
+                    throw LLMError("No speech was recognized. Audio was kept; check the sources and language in Settings, then retry.")
+                }
+                // A recognizer can finish successfully after capturing only a fragment.
+                // Do not turn a few words from a long recording into a destructive success.
+                let wordCount = raw.reduce(0) { $0 + $1.text.split(whereSeparator: { $0.isWhitespace }).count }
+                if meeting.duration >= 15 * 60 && wordCount < 100 {
+                    throw LLMError("Very little speech was recognized for this long recording. Audio was kept; check your audio sources and transcription backend in Settings, then retry.")
+                }
+                try await stageAdmission()
+                report(ProcessingProgress(stage: .diarizing, fraction: 0))
+                segments = try await ProcessingMeasurements.measure("speaker.analysis") {
+                    if let acoustic = diarizer as? any AudioDiarizer {
+                        return try await acoustic.diarize(raw, audio: prepared.audio, report: report)
+                    }
+                    return try await diarizer.diarize(raw)
+                }
+                try prepared.cleanup()
+            } catch { try? prepared.cleanup(); throw error }
         }
         try Task.checkCancellation()
         let cleaned = TranscriptCleanup.deduplicated(segments)
         try await checkpoint(cleaned)
+        try await stageAdmission()
         report(ProcessingProgress(stage: .summarizing, fraction: 0))
-        let summary = try await summarizer.summarize(segments: TranscriptCleanup.paragraphs(cleaned), title: meeting.title)
+        let summary = try await ProcessingMeasurements.measure("summary.total") {
+            let paragraphs = TranscriptCleanup.paragraphs(cleaned)
+            if let contextual = summarizer as? any MeetingSummarizer {
+                return try await contextual.summarize(segments: paragraphs, title: meeting.title, meeting: meeting)
+            }
+            return try await summarizer.summarize(segments: paragraphs, title: meeting.title)
+        }
 
         guard !summary.overall.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               summary.overall != "(no summary produced)" else {
@@ -203,8 +244,13 @@ public struct PipelineProcessor: TranscriptCheckpointingProcessor, SpeakerReproc
         guard let acoustic = diarizer as? any AudioDiarizer, let summary = meeting.summary else {
             throw LLMError("Speaker-only updates require a local audio diarizer and a saved summary.")
         }
-        let segments = try await acoustic.diarize(meeting.transcript, audio: audio, report: report)
-        return ProcessedResult(segments: segments, summary: summary, speakerAttribution: speakerAttribution)
+        try await stageAdmission()
+        let prepared = try await audioPreparer?.prepare(audio) ?? PreparedMeetingAudio(audio: audio)
+        do {
+            let segments = try await acoustic.diarize(meeting.transcript, audio: prepared.audio, report: report)
+            try prepared.cleanup()
+            return ProcessedResult(segments: segments, summary: summary, speakerAttribution: speakerAttribution)
+        } catch { try? prepared.cleanup(); throw error }
     }
 }
 

@@ -36,6 +36,8 @@ public final class TranscriberViewModel: ObservableObject {
     @Published public private(set) var progressByMeeting: [UUID: ProcessingProgress] = [:]
     /// A human-readable startup, storage, or processing error.
     @Published public private(set) var processingError: String?
+    @Published public private(set) var workByMeeting: [UUID: ProcessingWorkState] = [:]
+    public let scheduling: BackgroundProcessingScheduler
 
     private let engine: MeetingEngine
     private let capture: AudioCapture
@@ -86,9 +88,11 @@ public final class TranscriberViewModel: ObservableObject {
         startupError: String? = nil,
         processorFactory: ((AppSettings) -> any MeetingProcessor)? = nil,
         notifier: ((MeetingNotification) -> Void)? = nil,
-        artifacts: any MeetingArtifactManaging = MeetingArtifacts()
+        artifacts: any MeetingArtifactManaging = MeetingArtifacts(),
+        scheduling: BackgroundProcessingScheduler = BackgroundProcessingScheduler()
     ) {
         self.engine = engine
+        self.scheduling = scheduling
         self.capture = capture
         self.artifacts = artifacts
         self.processor = processor
@@ -181,6 +185,7 @@ public final class TranscriberViewModel: ObservableObject {
         if let activeMeeting, isRecording || isStarting { return activeMeeting }
         isStarting = true
         defer { isStarting = false }
+        await scheduling.setRecording(true)
         let sources = sources ?? settings.requestedSources
         let meeting = engine.start(title: title)
         activeMeeting = meeting
@@ -193,6 +198,7 @@ public final class TranscriberViewModel: ObservableObject {
             meetings = engine.recent
             activeMeeting = engine.active
             notifyTerminal(id: meeting.id, errorDescription: processingError)
+            await scheduling.setRecording(false)
             return meeting
         }
         do {
@@ -223,6 +229,7 @@ public final class TranscriberViewModel: ObservableObject {
         // so it survives a relaunch.
         self.persist()
         if engine.meeting(id: meeting.id)?.status == .failed {
+            await scheduling.setRecording(false)
             notifyTerminal(id: meeting.id, errorDescription: processingError)
         }
         return meeting
@@ -260,6 +267,7 @@ public final class TranscriberViewModel: ObservableObject {
                 activeMeeting = engine.active
                 persist()
                 isStopping = false
+                await scheduling.setRecording(false)
                 return
             }
         }
@@ -270,6 +278,7 @@ public final class TranscriberViewModel: ObservableObject {
         self.sessionMeetingID = nil
         self.captureStatus = self.capture.status
         isStopping = false
+        await scheduling.setRecording(false)
 
         // Kick off the post-stop pipeline (transcribe → summarize → retention).
         await self.runPipeline(for: id)
@@ -293,25 +302,36 @@ public final class TranscriberViewModel: ObservableObject {
         guard var meeting = engine.meeting(id: id), !meeting.deletionPending,
               meeting.status == .processing || meeting.status == .failed else { return false }
         guard !processingIDs.contains(id) else { return false }
-        // Keep the old checkpoint on disk until a fresh transcription succeeds.
-        if !reuseTranscript { meeting.transcript = [] }
+        // Preserve model/provider intent across queue waits and explicit resume.
+        let request = (reuseTranscript && !speakerOnly ? meeting.processingRequest : nil)
+            ?? ProcessingRequest(settings: settings, reuseTranscript: reuseTranscript, speakerOnly: speakerOnly)
+        engine.setProcessingRequest(id: id, request: request)
+        guard persist() else {
+            engine.fail(id: id, reason: processingError ?? "The queued meeting could not be saved. Audio was kept.")
+            meetings = engine.recent; activeMeeting = engine.active
+            return false
+        }
+        meeting.processingRequest = request
+        if !request.reuseTranscript { meeting.transcript = [] }
+        let speakerOnly = request.speakerOnly
         processingIDs.insert(id)
         defer {
             processingIDs.remove(id)
             processingTasks[id] = nil
             progressByMeeting[id] = nil
+            workByMeeting[id] = nil
         }
 
+        workByMeeting[id] = .queued(position: processingIDs.count)
         processingError = nil
         processingProgress = ProcessingProgress(stage: speakerOnly ? .diarizing : .transcribing, fraction: 0)
         progressByMeeting[id] = processingProgress
 
         do {
-            // Resolve the pipeline from the *current* settings when a factory
-            // is wired (so Settings changes take effect without a relaunch),
-            // falling back to the fixed processor otherwise.
+            // Resolve the saved queue intent. Ordinary backend failures clear
+            // that intent so a fresh Retry can use corrected current settings.
             let active: any MeetingProcessor =
-                processorFactory?(settings) ?? processor
+                processorFactory?(request.settings) ?? processor
             let report: @Sendable (ProcessingProgress) -> Void = { [weak self] p in
                 Task { @MainActor in
                     guard let self, self.processingIDs.contains(id) else { return }
@@ -319,24 +339,33 @@ public final class TranscriberViewModel: ObservableObject {
                     self.progressByMeeting[id] = p
                 }
             }
-            let task = Task {
-                let audio = CapturedAudio(fileURLs: meeting.audioFileURLs, startOffsets: meeting.audioStartOffsets)
-                if speakerOnly {
-                    guard let relabeler = active as? any SpeakerReprocessing else {
-                        throw LLMError("This backend does not support updating speaker labels separately.")
-                    }
-                    return try await relabeler.reprocessSpeakers(meeting: meeting, audio: audio, report: report)
+            let workReport: @Sendable (ProcessingWorkState) -> Void = { [weak self] state in
+                Task { @MainActor in
+                    guard let self, self.processingIDs.contains(id) else { return }
+                    if self.workByMeeting[id] != state { self.workByMeeting[id] = state }
                 }
-                if let checkpointing = active as? any TranscriptCheckpointingProcessor {
-                    let attribution = meeting.transcript.isEmpty ? checkpointing.speakerAttribution : meeting.speakerAttribution
-                    return try await checkpointing.process(
-                        meeting: meeting, audio: audio, report: report,
-                        checkpoint: { [weak self] segments in
-                            try await self?.retainTranscriptCheckpoint(id: id, segments: segments, attribution: attribution)
+            }
+            let scheduling = self.scheduling
+            let task = Task(priority: .utility) {
+                try await scheduling.run(id: id, report: workReport) {
+                    let audio = CapturedAudio(fileURLs: meeting.audioFileURLs, startOffsets: meeting.audioStartOffsets)
+                    if speakerOnly {
+                        guard let relabeler = active as? any SpeakerReprocessing else {
+                            throw LLMError("This backend does not support updating speaker labels separately.")
                         }
-                    )
+                        return try await relabeler.reprocessSpeakers(meeting: meeting, audio: audio, report: report)
+                    }
+                    if let checkpointing = active as? any TranscriptCheckpointingProcessor {
+                        let attribution = meeting.transcript.isEmpty ? checkpointing.speakerAttribution : meeting.speakerAttribution
+                        return try await checkpointing.process(
+                            meeting: meeting, audio: audio, report: report,
+                            checkpoint: { [weak self] segments in
+                                try await self?.retainTranscriptCheckpoint(id: id, segments: segments, attribution: attribution, keepTranscript: request.settings.keepTranscriptAfterSummary)
+                            }
+                        )
+                    }
+                    return try await active.process(meeting: meeting, audio: audio, report: report)
                 }
-                return try await active.process(meeting: meeting, audio: audio, report: report)
             }
             processingTasks[id] = task
             let result = try await withTaskCancellationHandler {
@@ -347,7 +376,7 @@ public final class TranscriberViewModel: ObservableObject {
 
             // Record the transcript (so it's inspectable before summarizing),
             // then mark summarized (clearing it unless retention keeps it).
-            let policy = RetentionPolicy(settings: settings)
+            let policy = RetentionPolicy(settings: request.settings)
             if speakerOnly {
                 engine.completeSpeakerUpdate(id: id, segments: result.segments, count: result.speakerCount, attribution: result.speakerAttribution)
             } else {
@@ -358,6 +387,7 @@ public final class TranscriberViewModel: ObservableObject {
                 )
             }
 
+            engine.setProcessingRequest(id: id, request: nil)
             let toDelete = speakerOnly ? [] : policy.artifactsToDelete(for: engine.meeting(id: id) ?? meeting)
             engine.scheduleArtifactDeletion(id: id, urls: toDelete)
             // The summary must be durable before any source audio is destroyed.
@@ -391,6 +421,9 @@ public final class TranscriberViewModel: ObservableObject {
             return true
         } catch {
             processingProgress = nil
+            if !(error is CancellationError) && !(error is ProcessingResourceInterruption) {
+                engine.setProcessingRequest(id: id, request: nil)
+            }
             processingError = error is CancellationError
                 ? "Processing was cancelled. Audio was kept; retry when you’re ready."
                 : (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
@@ -404,13 +437,13 @@ public final class TranscriberViewModel: ObservableObject {
             self.persist()
             // The meeting failed — surface it so the user knows to retry, with
             // the reason when we have one.
-            if !speakerOnly { self.notifyTerminal(id: id, errorDescription: processingError) }
+            if !speakerOnly, !(error is ProcessingResourceInterruption) { self.notifyTerminal(id: id, errorDescription: processingError) }
             return false
         }
     }
 
-    private func retainTranscriptCheckpoint(id: UUID, segments: [TranscriptSegment], attribution: SpeakerAttribution) throws {
-        guard settings.keepTranscriptAfterSummary else { return }
+    private func retainTranscriptCheckpoint(id: UUID, segments: [TranscriptSegment], attribution: SpeakerAttribution, keepTranscript: Bool) throws {
+        guard keepTranscript else { return }
         guard processingIDs.contains(id), engine.meeting(id: id) != nil else { throw CancellationError() }
         engine.setTranscript(id: id, segments: segments, attribution: attribution)
         meetings = engine.recent
@@ -481,6 +514,18 @@ public final class TranscriberViewModel: ObservableObject {
     /// Stop a pipeline without discarding its original recording.
     public func cancelProcessing(id: UUID) {
         processingTasks[id]?.cancel()
+        let previousRequest = engine.meeting(id: id)?.processingRequest
+        engine.setProcessingRequest(id: id, request: nil)
+        guard persist() else {
+            engine.setProcessingRequest(id: id, request: previousRequest)
+            meetings = engine.recent
+            return
+        }
+        meetings = engine.recent
+        if let meeting = engine.meeting(id: id) {
+            do { try artifacts.removeSummarySections(for: meeting) }
+            catch { processingError = "Partial notes cleanup could not finish: \(error.localizedDescription)" }
+        }
     }
 
     /// Retry a failed pipeline, or explicitly retranscribe a completed meeting
@@ -501,7 +546,8 @@ public final class TranscriberViewModel: ObservableObject {
     // MARK: - Settings
 
     public var canReplaceLocalModel: Bool {
-        !isRecording && !isStarting && !isStopping && processingIDs.isEmpty
+        !isRecording && !isStarting && !isStopping && processingIDs.isEmpty &&
+            !engine.stored.contains(where: { $0.processingRequest != nil })
     }
 
     /// The old weights may be removed only after this durable commit succeeds.

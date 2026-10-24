@@ -13,9 +13,11 @@ struct PreviewApp: App {
             summary: MeetingSummary(overall: "The team agreed to launch on Friday after completing the release checklist.",
                 keyPoints: ["The build is ready for final validation."], decisions: ["Launch on Friday."],
                 actionItems: ["Alex: finish release notes by Thursday."], model: "Validation fixture"))
-        _vm = StateObject(wrappedValue: TranscriberViewModel(capture: PreviewCapture(),
-            settingsStore: .inMemory(), meetingStore: .inMemory(initial: CommandLine.arguments.contains("--empty") ? [] : [meeting]),
-            artifacts: NoArtifacts()))
+        let fixtures = CommandLine.arguments.contains("--queue") ? (1...3).map { index in
+            Meeting(title: "Queued fixture \(index)", status: .failed, startedAt: now, createdAt: now, lastActivityAt: now)
+        } : (CommandLine.arguments.contains("--empty") ? [] : [meeting])
+        _vm = StateObject(wrappedValue: TranscriberViewModel(capture: PreviewCapture(), processor: QueuePreviewProcessor(),
+            settingsStore: .inMemory(), meetingStore: .inMemory(initial: fixtures), artifacts: NoArtifacts()))
     }
     var body: some Scene {
         WindowGroup("Transcriber Validation") {
@@ -28,6 +30,11 @@ struct PreviewApp: App {
             }
             .environment(\.localModelDownloadsEnabled, false)
             .onAppear { NSApp.activate(ignoringOtherApps: true) }
+            .task {
+                if CommandLine.arguments.contains("--queue") {
+                    for meeting in vm.meetings { Task { await vm.retry(id: meeting.id) } }
+                }
+            }
         }
         Settings {
             SettingsView(vm: vm).environment(\.localModelDownloadsEnabled, false)
@@ -47,5 +54,13 @@ private struct PreviewCapture: AudioCapture {
     func level(_ source: AudioSource) -> Float { 0 }
     func start(sources: Set<AudioSource>, directory: URL) async throws -> AudioCaptureSession {
         throw LLMError("Recording is disabled in this isolated UI fixture. Use the normal Transcriber app.")
+    }
+}
+
+private struct QueuePreviewProcessor: MeetingProcessor {
+    func process(meeting: Meeting, audio: CapturedAudio, report: @escaping @Sendable (ProcessingProgress) -> Void) async throws -> ProcessedResult {
+        report(ProcessingProgress(stage: .summarizing))
+        try await Task.sleep(nanoseconds: 600_000_000_000)
+        return ProcessedResult(segments: [], summary: MeetingSummary(overall: "Isolated queue fixture"))
     }
 }

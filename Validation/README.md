@@ -123,3 +123,45 @@ speaker-update button in the product. Legacy saved count hints are ignored. Norm
 do not rerun speaker matching. The default harness tests acoustic overlap
 assignment, returning identities, unknown labels, metadata persistence, failure
 preservation, managed PCM preparation and helper completion/cancellation.
+
+## Background workload validation
+
+```bash
+bash build.sh test
+bash Validation/run.sh preview --queue
+bash Validation/run.sh background --run-models --threads 4 --rounds 2
+build/validation-background --run-models --threads 2 --rounds 2
+```
+
+The opt-in background benchmark refuses to download missing assets. Explicitly
+prepare the default Whisper/Qwen models in Settings first. It creates public
+synthetic speech in an isolated temporary folder, verifies terminology and action
+owners/deadlines, emits numeric timing/resource JSON, and removes its source.
+It never loads the meeting library or changes selected models. Use the compiled
+binary for additional profiles so compilation does not contaminate measurements.
+Profiles change only CPU thread limits, not quantization or context. A fixed
+benchmark-only seed controls sampling across comparisons; production generation
+settings remain unchanged. Quality failures still emit numeric diagnostics and
+return a failing exit status. The four-thread production limit remains unchanged pending longer tests.
+
+Run profiles sequentially and repeat in reversed order to expose warm-cache and
+thermal effects. Keep cold-start results separate. Compare queue wait, preparation,
+model load, inference, token usage, retries and shutdown; include resource samples
+alongside elapsed time. The resource sampler is optional validation code, not
+production telemetry. Its main-actor delay is a scheduling proxy and cannot stand
+in for testing a worker's foreground browser, document and video-call interaction.
+
+The deterministic suite covers capture deferral, queued cancellation, stage-boundary
+yield, recovery hysteresis, Low Power Mode, critical interruption and explicit
+relaunch recovery. Actual-media/helper checks cover shared mixes, source validation,
+TERM-ignoring child teardown, native admission protection, section reuse/invalidation
+and default-retention isolation. The queue preview uses in-memory meetings and a
+sleeping fake processor, with recording/model downloads disabled.
+
+Before broad rollout, perform the section 30 PLAN.md workload gate: a 30–60 minute
+meeting, at least three queued recordings, a fresh live capture, realistic foreground
+work, sleep/wake, disk failures and relaunch. Require no lost recordings or unmanaged
+artifacts, no overlapping model lifetimes, recoverable interruption, and no sustained
+new swapping/critical pressure attributable to processing. Establish foreground
+latency thresholds against that workload's baseline and report worst observed
+latency as well as medians. Synthetic passes do not establish this acceptance.
