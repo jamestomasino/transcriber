@@ -70,8 +70,10 @@ jobs:
 
       - name: Verify signature + staple
         run: |
-          codesign -dv --verbose=4 build/Transcriber.app
-          spctl -a -vvv -t install build/Transcriber.app
+          set -euo pipefail
+          codesign --verify --deep --strict --verbose=2 build/Transcriber.app
+          codesign --display --verbose=4 build/Transcriber.app
+          spctl --assess --type execute --verbose=4 build/Transcriber.app
           xcrun stapler validate build/Transcriber.app
 
       - name: Package .zip
