@@ -1192,3 +1192,10 @@ unseeded two-thread trial missed an owner/deadline quality check in one round;
 no thread/model/runtime defaults were promoted. The benchmark now uses a fixed
 seed for controlled comparisons and emits diagnostics even on a quality failure.
 Long foreground/capture acceptance is still pending, not implied by these passes.
+
+Controlled synthetic profiling also completed two seeded rounds each at two and
+four threads, with term/owner/deadline checks passing in all four. Results and
+resource caveats are recorded in docs/LOCAL_MODELS.md. Startup time, run order,
+thermal state and system swap confound a simple speed comparison; keep the
+production four-thread limits. No VAD, decoder, model or runtime candidate was
+activated. Longer foreground/capture validation remains the rollout gate.

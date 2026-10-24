@@ -155,6 +155,45 @@ miss GPU allocations, system swap includes other apps, and dispatch delay is a
 proxy, not proof of browser/call responsiveness. Compare repeated runs on identical
 inputs, without compilation or other benchmarks running concurrently.
 
+### Cached synthetic thread comparison — 24 October 2026
+
+After compilation completed, two sequential runs per profile used the same
+11.119-second public speech fixture and Qwen notes input on the 8 GB A18 Pro.
+The benchmark fixed the summary seed at 42; each summary request processed 440
+input tokens and generated 206 output tokens. Both profiles passed the fixture's
+terminology and owner/deadline checks in both seeded rounds.
+
+| CPU threads | Whisper wall seconds, rounds 1 / 2 | Summary total seconds, rounds 1 / 2 | Summary request seconds, rounds 1 / 2 |
+| --- | --- | --- | --- |
+| 2 | 7.13 / 7.99 | 24.04 / 29.96 | 18.03 / 17.98 |
+| 4 | 6.74 / 7.31 | 32.33 / 32.42 | 19.55 / 21.00 |
+
+Summary totals include startup/shutdown; request time includes prompt processing
+and generation. Summary loading alone varied from 5.66 to 12.52 seconds. These
+short inputs exaggerate startup's share relative to a long meeting.
+
+The two-thread runs preceded the four-thread runs. Thermal state moved from
+nominal to fair in the former and stayed fair in the latter; these were not
+randomized, thermally matched foreground-workload trials. The two-thread profile
+is a candidate for further summary testing, not a demonstrated general speedup.
+The earlier unseeded two-thread trial missed a required owner/deadline check in
+one round. Seeded success is not a broad accuracy result, and no production
+thread, model, decoder, runtime or batch defaults were changed.
+
+Peak sampled combined app/helper RSS was approximately 3,201 MiB for two threads
+and 2,857 MiB for four threads, excluding some GPU allocations. System-reported
+swap use increased by about 97 and 191 MB respectively, with several GB already
+allocated and other applications uncontrolled. This does not establish the absence
+of paging or attribute the changes solely to inference. Sampled CPU percentages
+are process-lifetime averages, not instantaneous limits. Main-actor dispatch-delay
+p95 was about 0.09 / 0.22 ms respectively, a CLI scheduling proxy rather than a
+measurement of foreground interaction or live recording continuity.
+
+Full build validation passes 541 Core assertions plus actual media, retention,
+shared-preparation, cache, pressure-admission and helper lifecycle checks. The
+isolated queue preview launches with three in-memory jobs. The 30–60 minute
+foreground/capture soak and rollout thresholds in PLAN.md remain outstanding.
+
 ## Domain vocabulary
 
 Large v3 is a general speech model. Add relevant names, organizations, products,
