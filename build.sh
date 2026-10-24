@@ -145,7 +145,66 @@ cat > "${APP_DIR}/Contents/Info.plist" <<PLIST
 PLIST
 
 cp Sources/CWhisper/LICENSE "$RES_DIR/Whisper-LICENSE"
-cp Resources/AppIcon.icns "$RES_DIR/AppIcon.icns"
+
+# Build the app icon from the SVG source. Primary path uses only system tools
+# (qlmanage + sips + iconutil), so the CLT-only build stays intact and no Homebrew
+# dependency is needed. If a committed .icns exists and is newer than the SVG,
+# reuse it (fast path); otherwise regenerate. Falls back to the committed .icns
+# if rendering fails, so a machine without qlmanage can still build.
+build_icon() {
+  local svg="Resources/AppIcon-mac.svg"
+  local committed="Resources/AppIcon.icns"
+  local out="$RES_DIR/AppIcon.icns"
+
+  # Fast path: reuse the committed icon when the SVG hasn't changed.
+  if [ -f "$committed" ] && [ "$committed" -nt "$svg" ]; then
+    cp "$committed" "$out"
+    return 0
+  fi
+
+  if [ ! -f "$svg" ]; then
+    [ -f "$committed" ] && cp "$committed" "$out"
+    echo "    (no $svg and no committed icon; app will use the default icon)"
+    return 0
+  fi
+
+  local work iconset
+  work="$(mktemp -d "${TMPDIR:-/tmp}/transcriber-icon.XXXXXX")"
+  iconset="$work/AppIcon.iconset"
+  mkdir -p "$iconset"
+
+  # Standard macOS iconset: 1x and 2x at each base size.
+  local entries=(
+    "icon_16x16.png:16"      "icon_16x16@2x.png:32"
+    "icon_32x32.png:32"      "icon_32x32@2x.png:64"
+    "icon_128x128.png:128"   "icon_128x128@2x.png:256"
+    "icon_256x256.png:256"   "icon_256x256@2x.png:512"
+    "icon_512x512.png:512"   "icon_512x512@2x.png:1024"
+  )
+  local e pair px dir src
+  for e in "${entries[@]}"; do
+    pair="${e%%:*}"; px="${e##*:}"
+    dir="$(mktemp -d "$work/ql.XXXXXX")"
+    qlmanage -t -s "$px" -o "$dir" "$svg" >/dev/null 2>&1 || true
+    src="$(find "$dir" -name '*.png' 2>/dev/null | head -1)"
+    if [ -z "$src" ] || [ ! -f "$src" ]; then
+      echo "    icon render failed at ${px}px; falling back to committed .icns"
+      rm -rf "$work"
+      [ -f "$committed" ] && cp "$committed" "$out"
+      return 0
+    fi
+    sips -z "$px" "$px" "$src" --out "${iconset}/${pair}" >/dev/null 2>&1
+  done
+
+  if iconutil -c icns "$iconset" -o "$out" 2>/dev/null; then
+    echo "==> Built app icon from $svg (system tools)"
+  else
+    echo "    iconutil failed; falling back to committed .icns"
+    [ -f "$committed" ] && cp "$committed" "$out"
+  fi
+  rm -rf "$work"
+}
+build_icon
 
 echo "==> Writing PkgInfo"
 printf 'APPL????' > "${APP_DIR}/Contents/PkgInfo"
