@@ -82,7 +82,7 @@ struct WhisperTranscriber: Transcriber {
             guard next > start else { throw LocalInferenceError("Whisper audio preparation made no progress. Original audio was kept.") }
             file.framePosition = next
         }
-        return result
+        return TranscriptCleanup.removingWhisperLoops(result)
     }
 }
 

@@ -2,7 +2,8 @@ import Foundation
 
 /// Deterministic cleanup, without a model call or speculative word correction.
 /// Keep small timed segments for voice matching; use paragraphs for reading and
-/// summarization. Only time-qualified overlap can justify deleting speech.
+/// summarization. Generic deduplication requires time-qualified overlap; the
+/// separate Whisper decoder-loop heuristic is explicitly applied at recognition.
 public enum TranscriptCleanup {
     public static let maximumParagraphCharacters = 1_200
     public static let maximumParagraphSeconds: TimeInterval = 60
@@ -14,6 +15,53 @@ public enum TranscriptCleanup {
         pattern: #"[\p{L}\p{N}]+(?:['’./:_-][\p{L}\p{N}]+)*|[\p{Sc}\p{Sm}%\-°@#&*/^]"#)
     private static let negations: Set<String> = ["not", "no", "never", "without", "cannot", "can't", "don't", "doesn't", "didn't", "won't", "isn't", "wasn't", "shouldn't", "couldn't", "wouldn't"]
     private static let units: Set<String> = ["g", "mg", "kg", "ug", "µg", "μg", "l", "ml", "m", "mm", "s", "ms", "w", "kw", "mw", "hz", "mhz", "ghz", "pa", "mpa", "b", "kb", "mb", "gb", "tb", "mbps", "gbps", "mol", "mmol"]
+
+    /// Whisper can fill a decoding window with a sentence (or sentence cycle)
+    /// repeated at advancing timestamps. This is a conservative heuristic, not
+    /// acoustic proof. Apply only to Whisper output, before speaker attribution:
+    /// ghost intervals can otherwise acquire unrelated or unknown voice labels.
+    /// Keep the first cycle's original IDs/times; never extend it over the loop.
+    public static func removingWhisperLoops(_ segments: [TranscriptSegment]) -> [TranscriptSegment] {
+        let keys = segments.map { tokens($0.text).map(\.key) }
+        var result: [TranscriptSegment] = []
+        var index = 0
+        while index < segments.count {
+            var loopEnd = index
+            var cycleLength = 0
+            // Bound motif size, but scan its entire run so a long loop is not
+            // merely shortened to several copies of the same sentence.
+            for width in 1...4 {
+                guard index + width <= segments.count else { break }
+                var end = index
+                while end < segments.count {
+                    let segment = segments[end]
+                    guard validTime(segment), keys[end].count >= 5,
+                          keys[end] == keys[index + (end - index) % width] else { break }
+                    if end > index {
+                        let previous = segments[end - 1]
+                        let gap = segment.startOffset - previous.endOffset
+                        guard gap >= -0.15, gap <= 0.3,
+                              segment.startOffset > previous.startOffset else { break }
+                        if let a = segments[index].audioSectionStart, let b = segment.audioSectionStart, a != b { break }
+                    }
+                    end += 1
+                }
+                let cycles = (end - index) / width
+                let completeEnd = index + cycles * width
+                guard cycles >= 2, cycles * width >= 4,
+                      segments[completeEnd - 1].endOffset - segments[index].startOffset >= 6 else { continue }
+                if completeEnd > loopEnd { loopEnd = completeEnd; cycleLength = width }
+            }
+            if cycleLength > 0 {
+                result.append(contentsOf: segments[index..<(index + cycleLength)])
+                index = loopEnd
+            } else {
+                result.append(segments[index])
+                index += 1
+            }
+        }
+        return result
+    }
 
     public static func readable(_ segments: [TranscriptSegment]) -> [TranscriptSegment] {
         paragraphs(deduplicated(segments))

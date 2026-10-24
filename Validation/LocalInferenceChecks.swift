@@ -17,11 +17,18 @@ struct LocalInferenceChecks {
             guard let meeting = MeetingStore(url: StorageDirectory.meetingsURL(settings: settings)).load().first(where: { $0.id == id }) else {
                 throw LocalInferenceError("The requested retained transcript was not found.")
             }
-            let cleaned = TranscriptCleanup.deduplicated(meeting.transcript)
+            // Explicit Whisper diagnostic: old retained transcripts may lack
+            // section metadata and already carry labels on hallucinated audio.
+            let source = arguments.contains("--whisper-loops")
+                ? TranscriptCleanup.removingWhisperLoops(meeting.transcript) : meeting.transcript
+            let cleaned = TranscriptCleanup.deduplicated(source)
             let paragraphs = TranscriptCleanup.paragraphs(cleaned)
             let before = meeting.transcript.reduce(0) { $0 + $1.text.split(whereSeparator: \.isWhitespace).count }
             let after = cleaned.reduce(0) { $0 + $1.text.split(whereSeparator: \.isWhitespace).count }
             guard TranscriptCleanup.deduplicated(cleaned) == cleaned else { throw LocalInferenceError("Cleanup was not idempotent") }
+            if arguments.contains("--whisper-loops") {
+                guard TranscriptCleanup.removingWhisperLoops(source) == source else { throw LocalInferenceError("Whisper loop cleanup was not idempotent") }
+            }
             print("✓ Read-only retained transcript check: \(meeting.transcript.count) segments → \(cleaned.count) cleaned segments → \(paragraphs.count) paragraphs; \(before - after) replayed words removed")
             print("No meeting data, summary or audio was changed.")
             return

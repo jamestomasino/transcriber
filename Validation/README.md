@@ -96,6 +96,7 @@ bash Validation/run.sh models --summary-only
 bash Validation/run.sh models --catalog       # public metadata only; no weights downloaded
 bash Validation/run.sh models --probe-current # switch-time synthetic check on the cached default
 bash Validation/run.sh models --inspect-cleanup <UUID> # read-only retained transcript cleanup statistics
+bash Validation/run.sh models --inspect-cleanup <UUID> --whisper-loops # also measure Whisper decoder loops
 ```
 
 These checks download missing pinned public weights, then process synthetic

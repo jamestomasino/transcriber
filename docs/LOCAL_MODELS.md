@@ -36,6 +36,18 @@ stages. Whisper processes five-minute, overlapping PCM sections in memory, about
 
 ## Transcript cleanup
 
+Whisper output first passes a decoder-loop heuristic, before acoustic speaker
+labeling. Contiguous exact sentence cycles of one to four segments collapse to
+their first cycle only when there are at least two cycles, four segments and six
+seconds of output, with at least five tokens per segment. Gaps over 0.3 seconds,
+overlaps over 0.15 seconds, invalid timing, and known section changes break the
+run. Retained segments keep their original IDs and timing, without stretching
+speech across the discarded interval. This handles both a single sentence
+repeated dozens of times and alternating sentence loops. It is a heuristic:
+deliberately reciting the same long sentence cycle can also match. Short replies,
+isolated repeats and changed words are preserved. Other providers, saved
+transcripts and speaker-only updates do not automatically use this heuristic.
+
 After speaker matching, a deterministic Core cleanup compares recent segments
 from the same known speaker. It removes exact replayed wording only when
 overlapping timings or Whisper's section provenance support the match. Matches
@@ -66,6 +78,14 @@ readable paragraphs. Saved meeting data and audio were not modified. Regression
 fixtures cover multi-line overlap, deliberate repetition, changing speakers,
 uncertain identities, legacy decoding, idempotence, changed values/negations,
 unit case, currency/math symbols, paragraph limits and checkpoint/summary order.
+
+The explicit `--inspect-cleanup <UUID> --whisper-loops` read-only diagnostic
+on that same retained meeting reduced 655 segments to 617 and removed 308
+repeated words with both cleanup stages, including the 36-copy opening and
+alternating two-sentence loop. It did not modify the saved meeting or regenerate
+its summary. These are text regression checks, not an audio-grounded accuracy
+measurement or recovery of speech the decoder may have omitted.
+The expanded harness passes 512 assertions plus the real-media checks.
 
 ## Domain vocabulary
 

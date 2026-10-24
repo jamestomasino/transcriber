@@ -635,6 +635,55 @@ do {
     check(spy.received == paragraphs, "summary-only retries clean older saved transcripts without retranscribing audio")
 } catch { check(false, "transcript cleanup: \(error)") }
 
+section("Whisper ghost loops at advancing timestamps")
+do {
+    // Actual timings/wording from the retained recording, without its other
+    // meeting content. Labels varied because the loop preceded voice matching.
+    let ends: [Double] = [90, 91.96, 93.1, 93.96, 94.96, 95.8, 96.64, 97.48, 98.32, 99.16, 99.98,
+        100.82, 101.66, 102.5, 103.34, 104.18, 105, 105.84, 106.66, 107.58, 108.4, 109.24,
+        110.08, 110.92, 111.76, 112.6, 113.42, 114.26, 115.1, 115.94, 116.76, 117.6, 118.44,
+        119.28, 120.12, 120.96, 121.8]
+    let loop = (0..<36).map { i in
+        TranscriptSegment(speaker: i % 3 == 0 ? "Unknown speaker" : "Speaker \(i % 2 + 1)",
+            text: "- All right, we can start with her.", startOffset: ends[i], endOffset: ends[i + 1])
+    }
+    let alternating: [TranscriptSegment] = (0..<4).map { i in
+        let text = i % 2 == 0 ? "I think that's really important." : "I think that's really important, too."
+        let start = 618.0 + Double(i * 2)
+        return TranscriptSegment(speaker: "Speaker 2", text: text, startOffset: start, endOffset: start + 2)
+    }
+    let cleaned = TranscriptCleanup.removingWhisperLoops(loop)
+    check(cleaned == [loop[0]], "the real 36-line ghost run becomes one utterance with its original ID, label and timing")
+    check(TranscriptCleanup.removingWhisperLoops(alternating) == Array(alternating.prefix(2)),
+          "the real alternating sentence loop retains one complete cycle including 'too'")
+    let following = TranscriptSegment(speaker: "Speaker 2", text: "Let's discuss the next topic.", startOffset: 121.8, endOffset: 126.8)
+    check(TranscriptCleanup.removingWhisperLoops(loop + [following]) == [loop[0], following],
+          "novel speech after a long loop survives unchanged")
+    check(TranscriptCleanup.removingWhisperLoops(cleaned) == cleaned, "Whisper loop cleanup is idempotent")
+    check(TranscriptCleanup.removingWhisperLoops(Array(loop.prefix(2))) == Array(loop.prefix(2)),
+          "an isolated repeated sentence survives")
+    var acknowledgments = alternating
+    for i in acknowledgments.indices { acknowledgments[i].text = "Yes, yes." }
+    check(TranscriptCleanup.removingWhisperLoops(acknowledgments) == acknowledgments, "short acknowledgments survive even in runs")
+    var separated = alternating
+    for i in separated.indices { separated[i].startOffset += Double(i * 5); separated[i].endOffset += Double(i * 5) }
+    check(TranscriptCleanup.removingWhisperLoops(separated) == separated, "recurring sentences separated by gaps survive")
+    var sections = alternating
+    for i in sections.indices { sections[i].audioSectionStart = i < 2 ? 0 : 622 }
+    check(TranscriptCleanup.removingWhisperLoops(sections) == sections, "decoder loop detection does not cross audio sections")
+    var overlapping = alternating
+    for i in overlapping.indices { overlapping[i].startOffset = 618; overlapping[i].endOffset = 626 }
+    check(TranscriptCleanup.removingWhisperLoops(overlapping) == overlapping, "overlap replay is left to the separate timing-qualified cleanup")
+    for change in ["I think that's not really important.", "The approved dose is 20 mg.", "The approved dose is 10 MG."] {
+        var revised = alternating
+        revised[2].text = change
+        check(TranscriptCleanup.removingWhisperLoops(revised) == revised, "changed wording is never fuzzy-matched: \(change)")
+    }
+    var invalid = alternating; invalid[2].endOffset = .nan
+    check(TranscriptCleanup.removingWhisperLoops(invalid).count == invalid.count, "invalid timing cannot justify removing speech")
+    check(TranscriptCleanup.deduplicated(loop) == loop, "generic cleanup does not apply Whisper heuristics to other providers or speaker-only updates")
+}
+
 section("acoustic speaker alignment and safe speaker-only updates")
 do {
     let original = [
