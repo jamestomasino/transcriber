@@ -3,7 +3,10 @@
 The app builds with Command Line Tools and `swiftc`; full Xcode is not required.
 `bash build.sh test` builds an ad-hoc signed app and runs the Core and media
 checks. Developer ID signing and notarization are optional distribution steps.
-They have not been exercised against Apple's service in this checkout.
+A GitHub-hosted macOS 26 run completed Developer ID signing, Apple notarization,
+stapling, strict signature verification and Gatekeeper assessment on 24 October
+2026: [validated run](https://github.com/jamestomasino/transcriber/actions/runs/40121174120).
+This does not replace recording/permission checks on a recipient's Mac.
 
 ## Credentials
 
@@ -140,7 +143,9 @@ are serialized and are not automatically cancelled.
 Configure `TRANSCRIBER_BUNDLE_ID` as a repository variable if distributing under
 a different identifier. Permission prompts are associated with application
 identity: choose the identifier before distributing builds and keep it stable.
-The workflow itself has not been dispatched during this work.
+The manual `main` run above passed and produced a verified ZIP artifact. The
+separate publishing job is skipped on `main`; automatic GitHub Release creation
+still needs validation with an intentional version tag.
 
 Mac App Store distribution would require a separate sandbox, provisioning, and
 capture compatibility review. This repository currently targets direct
