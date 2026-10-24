@@ -77,8 +77,18 @@ jobs:
       - name: Package .zip
         run: ditto -c -k --keepParent build/Transcriber.app build/Transcriber.zip
 
+      - name: Upload signed app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Transcriber-macOS
+          path: build/Transcriber.zip
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Publish to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: build/Transcriber.zip
           generate_release_notes: true
+          fail_on_unmatched_files: true
