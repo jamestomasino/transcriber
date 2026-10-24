@@ -62,6 +62,30 @@ actor LocalModelAssets {
         return (attributes[.size] as? NSNumber)?.intValue == spec.sizeBytes
     }
 
+    /// Only summary-weight IDs are eligible. Runtime, speech, speaker and
+    /// meeting artifacts cannot be reached by model replacement cleanup.
+    func removeSummaryWeights(_ spec: ModelSpec) throws -> Int {
+        guard let hash = spec.sha256, hash.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil,
+              spec.id == "summary-" + hash || (spec.id == SummaryModelCatalog.defaultID && hash == SummaryModelCatalog.all[0].sha256),
+              pending[spec.id] == nil else { throw LocalInferenceError("This model download cannot be removed right now.") }
+        let file = root.appendingPathComponent(spec.id + ".bin")
+        let size = ((try? FileManager.default.attributesOfItem(atPath: file.path)[.size]) as? NSNumber)?.intValue ?? 0
+        if FileManager.default.fileExists(atPath: file.path) { try FileManager.default.removeItem(at: file) }
+        try? FileManager.default.removeItem(at: root.appendingPathComponent(".\(spec.id).resume"))
+        verified[spec.id] = nil
+        return size
+    }
+
+    func checkSpace(for spec: ModelSpec) throws {
+        if isDownloaded(spec) { return }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let values = try root.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+        if let free = values.volumeAvailableCapacityForImportantUsage,
+           free < Int64(spec.sizeBytes) + 128 * 1_024 * 1_024 {
+            throw LocalInferenceError("There isn't enough free space to keep the current model while downloading its replacement. Free some space and try again.")
+        }
+    }
+
     func ensure(_ spec: ModelSpec) async throws -> URL {
         if let task = pending[spec.id] { return try await waitForShared(task) }
         let task = Task { try await self.fetch(spec) }

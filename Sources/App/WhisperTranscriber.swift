@@ -56,7 +56,7 @@ struct WhisperTranscriber: Transcriber {
             }
             parameters.abort_callback_user_data = Unmanaged.passUnretained(cancellation).toOpaque()
             let code = language.replacingOccurrences(of: "_", with: "-").split(separator: "-").first.map(String.init) ?? "auto"
-            let glossary = String(vocabulary.prefix(1_000))
+            let glossary = TranscriptionVocabulary(vocabulary).prompt
             let status = code.withCString { locale in
                 glossary.withCString { hint in
                     parameters.language = locale

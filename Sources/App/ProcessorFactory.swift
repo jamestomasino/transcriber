@@ -32,8 +32,8 @@ public struct URLSessionModelDownloader: ModelDownloader {
 // The single decision point that turns `AppSettings` into a concrete
 // `MeetingProcessor`. This is where the pluggability lives:
 //
-//   .whisper   → downloaded Whisper (default, offline) + heuristic diarizer
-//   .local     → Apple Speech (on-device, private, no key) + heuristic diarizer
+//   .whisper   → downloaded Whisper (default, offline) + acoustic diarizer
+//   .local     → Apple Speech (on-device, private, no key) + acoustic diarizer
 //   .deepgram  → Deepgram Nova (accurate speaker ID, needs a key) + identity diarizer
 //
 // The default summarizer is the downloaded local model (.localModel). Apple
@@ -55,10 +55,10 @@ public enum ProcessorFactory {
         switch settings.transcriptionBackend {
         case .whisper:
             transcriber = WhisperTranscriber(modelID: settings.whisperModel, vocabulary: settings.transcriptionVocabulary)
-            diarizer = HeuristicDiarizer()
+            diarizer = LocalSpeakerDiarizer()
         case .local:
             transcriber = LocalSpeechTranscriber()
-            diarizer = HeuristicDiarizer()
+            diarizer = LocalSpeakerDiarizer()
         case .deepgram:
             transcriber = DeepgramTranscriber(apiKey: { Keychain.get("deepgram_api_key") }, http: http)
             diarizer = IdentityDiarizer()
@@ -68,7 +68,8 @@ public enum ProcessorFactory {
             transcriber: PreparingTranscriber(inner: transcriber, prepareSingleSource: settings.transcriptionBackend == .deepgram),
             diarizer: diarizer,
             summarizer: summarizer,
-            language: settings.language
+            language: settings.language,
+            speakerAttribution: settings.transcriptionBackend == .deepgram ? .provider : .voiceClustering
         )
     }
 

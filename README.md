@@ -26,17 +26,20 @@ The summary is the only thing that sticks around. That's the point.
   Cloud-bound audio is compressed before upload. Temporary mixes are removed
   after transcription, including when it fails.
 - **Speaker labels.** Deepgram separates voices into Speaker 1, Speaker 2, ….
-  Local speech uses approximate labels based on pauses; it cannot reliably
-  identify different people.
+  Local speech uses downloaded acoustic models to match returning voices.
+  Labels remain estimates; the app does not identify participants by name.
 - **A structured summary.** Overall, key points, decisions, and action items —
   not a wall of text.
 - **Local by default.** Fresh installs use Whisper Large v3 for transcription
   and a quantized Qwen 3.5 4B model for summaries. Download about 4.2 GB once,
   then process meetings offline without an account or API key. Saved backend
   choices are preserved. The initial language code is `en`.
-- **Terminology hints.** Add a short list of drug names, trial identifiers,
-  company names or acronyms to help Whisper recognize specialist conversations.
+- **Local vocabulary.** Save names, organizations, products, projects and
+  acronyms in Settings to help Whisper recognize terminology in your meetings.
   Large v3 prioritizes accuracy; Turbo offers a smaller, faster option.
+- **Local model updates.** Check available Qwen summary models in Settings.
+  Fit estimates help you choose for this Mac; switching verifies and tests the
+  replacement before saving the selection and deleting the previous weights.
 - **Cloud when you want it.** Swap in Deepgram (best speaker ID) or
   OpenAI / Anthropic (stronger summaries) with a key — or mix and match per
   stage.
@@ -165,8 +168,9 @@ summary providers selects a compatible model; you can then enter a custom model.
 | -------------- | ----------------------------------------------------------------------- |
 | **Audio**      | Capture microphone / system audio; microphone device picker.          |
 | **Storage**    | Keep transcript / keep audio after summary; **Data location** picker.  |
-| **Transcription** | Backend, Whisper size, terminology hints, language, and Deepgram key.     |
-| **Summary**    | Downloaded local, Apple or cloud backend; model and provider key.     |
+| **Transcription** | Backend, Whisper size, language, and Deepgram key.     |
+| **Local vocabulary** | Saved names, organizations, products, projects and acronyms, one per line; reused as Whisper hints. |
+| **Summary**    | Local model discovery, fit recommendations, verified replacement; Apple/cloud alternatives and provider keys. |
 | **General**    | Show toasts; notify when a summary is ready.                           |
 
 ---

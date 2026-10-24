@@ -136,7 +136,11 @@ public struct AnthropicSummarizer: Summarizer {
 public struct LocalJSONSummarizer: Summarizer {
     public let model: String
     public let http: any HTTPClient
-    public init(model: String, http: any HTTPClient) { self.model = model; self.http = http }
+    public let maximumOutputTokens: Int
+    public init(model: String, http: any HTTPClient, maximumOutputTokens: Int = 3_072) {
+        self.model = model; self.http = http
+        self.maximumOutputTokens = min(3_072, max(512, maximumOutputTokens))
+    }
     public func summarize(segments: [TranscriptSegment], title: String) async throws -> MeetingSummary {
         let stringArray: [String: Any] = ["type": "array", "items": ["type": "string"]]
         let schema: [String: Any] = [
@@ -150,7 +154,7 @@ public struct LocalJSONSummarizer: Summarizer {
                 ["role": "user", "content": Summary.prompt(title: title, transcript: Summary.transcriptText(segments))]
             ],
             "response_format": ["type": "json_schema", "json_schema": ["name": "meeting_notes", "strict": true, "schema": schema]],
-            "temperature": 0.1, "max_tokens": 3_072, "stream": false,
+            "temperature": 0.1, "max_tokens": maximumOutputTokens, "stream": false,
             "chat_template_kwargs": ["enable_thinking": false], "cache_prompt": false
         ]
         let response = try await http.send(HTTPRequest(url: URL(string: "http://localhost/v1/chat/completions")!,

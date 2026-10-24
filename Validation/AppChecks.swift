@@ -7,8 +7,21 @@ import Darwin
 @main
 struct AppChecks {
     static func main() async throws {
+        if CommandLine.arguments.count == 5, CommandLine.arguments[1] == "--speaker-parent-fixture" {
+            let executable = URL(fileURLWithPath: CommandLine.arguments[2])
+            let wave = URL(fileURLWithPath: CommandLine.arguments[3])
+            let pid = URL(fileURLWithPath: CommandLine.arguments[4])
+            let assets = SpeakerAssets(executable: executable, segmentation: wave, embedding: wave)
+            _ = Task { try await SpeakerAnalysisProcess().run(assets: assets, wave: wave, report: { _ in }) }
+            for _ in 0..<100 {
+                if FileManager.default.fileExists(atPath: pid.path) { exit(0) }
+                try await Task.sleep(nanoseconds: 10_000_000)
+            }
+            exit(1)
+        }
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("transcriber-media-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        RecordingsDirectory.baseDirectory = { root.appendingPathComponent("isolated-recordings") }
         defer { try? FileManager.default.removeItem(at: root) }
         let dataRoot = root.appendingPathComponent("Documents/Transcriber", isDirectory: true)
         let settings = AppSettings(storageDirectory: dataRoot)
@@ -109,6 +122,55 @@ struct AppChecks {
         precondition(wave.framePosition == wave.length)
         print("✓ Whisper audio conversion reads bounded 16 kHz mono sections without disk intermediates")
 
+        let speakerWave = root.appendingPathComponent(CapturedAudio.speakerAudioFileName)
+        try LocalSpeakerDiarizer.prepareWave(input: mic, output: speakerWave)
+        let speakerFile = try AVAudioFile(forReading: speakerWave)
+        precondition(speakerFile.fileFormat.sampleRate == 16_000 && speakerFile.fileFormat.channelCount == 1)
+        precondition(abs(Double(speakerFile.length) / 16_000 - 1) < 0.01)
+        let speakerTurns = try LocalSpeakerDiarizer.parse("Started\n0.000 -- 1.000 speaker_02\n1.000 -- 2.000 speaker_00\n3.000 -- 4.000 speaker_02\n")
+        precondition(speakerTurns.count == 3 && speakerTurns[0].speaker == speakerTurns[2].speaker)
+        print("✓ Speaker audio preparation produces managed 16 kHz mono PCM and parses returning voice identities")
+
+        let speakerExecutable = root.appendingPathComponent("fixture-speaker-runtime")
+        let fixtureAssets = SpeakerAssets(executable: speakerExecutable, segmentation: mic, embedding: mic)
+        try "#!/bin/sh\nprintf 'progress 50.00%%\\n' >&2\nprintf '0.000 -- 1.000 speaker_00\\n'\n".write(to: speakerExecutable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: speakerExecutable.path)
+        let speakerOutput = try await SpeakerAnalysisProcess().run(assets: fixtureAssets, wave: speakerWave, report: { _ in })
+        let parsedSpeakerOutput = try LocalSpeakerDiarizer.parse(speakerOutput)
+        precondition(parsedSpeakerOutput.count == 1)
+        try "#!/bin/sh\nexit 7\n".write(to: speakerExecutable, atomically: false, encoding: .utf8)
+        do {
+            _ = try await SpeakerAnalysisProcess().run(assets: fixtureAssets, wave: speakerWave, report: { _ in })
+            preconditionFailure("Nonzero speaker helper exit must fail")
+        } catch is LocalInferenceError {}
+        let speakerPID = root.appendingPathComponent("speaker-pid")
+        try "#!/bin/sh\nprintf '%s' \"$$\" > '\(speakerPID.path)'\nexec /bin/sleep 30\n".write(to: speakerExecutable, atomically: false, encoding: .utf8)
+        let speakerJob = Task { try await SpeakerAnalysisProcess().run(assets: fixtureAssets, wave: speakerWave, report: { _ in }) }
+        for _ in 0..<100 {
+            if FileManager.default.fileExists(atPath: speakerPID.path) { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let speakerChild = Int32(try String(contentsOf: speakerPID, encoding: .utf8))!
+        speakerJob.cancel()
+        do { _ = try await speakerJob.value; preconditionFailure("Speaker cancellation must throw") } catch is CancellationError {}
+        precondition(Darwin.kill(speakerChild, 0) != 0)
+        try FileManager.default.removeItem(at: speakerPID)
+        let speakerHost = Process()
+        speakerHost.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+        speakerHost.arguments = ["--speaker-parent-fixture", speakerExecutable.path, speakerWave.path, speakerPID.path]
+        speakerHost.standardOutput = FileHandle.nullDevice; speakerHost.standardError = FileHandle.nullDevice
+        try speakerHost.run(); speakerHost.waitUntilExit()
+        precondition(speakerHost.terminationStatus == 0)
+        let orphanSpeakerPID = Int32(try String(contentsOf: speakerPID, encoding: .utf8))!
+        for _ in 0..<100 {
+            if Darwin.kill(orphanSpeakerPID, 0) != 0 { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let childStoppedOnEOF = Darwin.kill(orphanSpeakerPID, 0) != 0
+        if !childStoppedOnEOF { Darwin.kill(orphanSpeakerPID, SIGKILL) }
+        precondition(childStoppedOnEOF)
+        print("✓ Speaker helper reports failure, completes normally and reaps children on cancellation and parent exit")
+
         let fixtureWeights = Data("verified-local-model-fixture".utf8)
         let hash = SHA256.hash(data: fixtureWeights).map { String(format: "%02x", $0) }.joined()
         let spec = ModelSpec(id: "fixture-model", displayName: "Fixture", sizeBytes: fixtureWeights.count,
@@ -124,6 +186,48 @@ struct AppChecks {
         precondition(fakeDownload.count == 2)
         try LocalModelAssets.validate(cached, spec: spec)
         print("✓ Pinned local model cache validates SHA256, reuses offline assets and repairs same-size corruption")
+
+        let replacementBytes = Data("replacement-model-fixture".utf8)
+        let replacementHash = SHA256.hash(data: replacementBytes).map { String(format: "%02x", $0) }.joined()
+        let oldHash = SHA256.hash(data: fixtureWeights).map { String(format: "%02x", $0) }.joined()
+        func option(hash: String, size: Int) -> SummaryModelOption {
+            let repository = "bartowski/Qwen3.5-4B-GGUF", revision = String(repeating: "c", count: 40), filename = "Fixture-Q4_K_M.gguf"
+            return SummaryModelOption(asset: ModelSpec(id: "summary-" + hash, displayName: "Fixture", sizeBytes: size,
+                url: URL(string: "https://huggingface.co/\(repository)/resolve/\(revision)/\(filename)")!, sha256: hash),
+                repository: repository, revision: revision, filename: filename, architecture: "qwen35", parameterBillions: 4,
+                version: "3.5", updatedAt: "2026-10-24", license: "apache-2.0")
+        }
+        let oldOption = option(hash: oldHash, size: fixtureWeights.count)
+        let newOption = option(hash: replacementHash, size: replacementBytes.count)
+        let switchRoot = root.appendingPathComponent("replacement-cache")
+        try FileManager.default.createDirectory(at: switchRoot, withIntermediateDirectories: true)
+        let previousWeights = switchRoot.appendingPathComponent(oldOption.id + ".bin")
+        try fixtureWeights.write(to: previousWeights)
+        let unrelated = switchRoot.appendingPathComponent("speaker-fixture.bin")
+        try fixtureWeights.write(to: unrelated)
+        let switchAssets = LocalModelAssets(root: switchRoot, downloader: FixtureModelDownloader(data: replacementBytes))
+        let registry = SummaryModelRegistry(root: switchRoot)
+        try await registry.merge([oldOption, newOption])
+        let settingsStore = SettingsStore.inMemory(initial: AppSettings(summaryModel: oldOption.id))
+        let switchVM = await TranscriberViewModel(capture: RecordingAudioCapture(directory: root.appendingPathComponent("isolated-recordings")),
+            settings: settingsStore.load(), settingsStore: settingsStore, meetingStore: .inMemory())
+        let switchWarning = try await ModelReplacement.perform(prepare: {
+            let downloaded = try await switchAssets.ensure(newOption.asset)
+            try LocalModelAssets.validate(downloaded, spec: newOption.asset)
+            precondition(FileManager.default.fileExists(atPath: previousWeights.path))
+            try await registry.recordCheck(newOption)
+        }, activate: { try await switchVM.activateLocalSummaryModel(newOption.id, replacing: oldOption.id) }, removePrevious: {
+            precondition(settingsStore.load().summaryModel == newOption.id)
+            _ = try await switchAssets.removeSummaryWeights(oldOption.asset)
+        }, discardNew: { _ = try? await switchAssets.removeSummaryWeights(newOption.asset) })
+        precondition(switchWarning == nil && !FileManager.default.fileExists(atPath: previousWeights.path))
+        precondition(FileManager.default.fileExists(atPath: switchRoot.appendingPathComponent(newOption.id + ".bin").path))
+        precondition(FileManager.default.fileExists(atPath: unrelated.path))
+        let restored = try await SummaryModelRegistry(root: switchRoot).option(id: newOption.id)
+        let checked = await registry.checkedIDs()
+        precondition(restored == newOption && checked.contains(newOption.id))
+        do { _ = try await switchAssets.removeSummaryWeights(spec); preconditionFailure("Non-summary assets must not be removed") } catch is LocalInferenceError {}
+        print("✓ Model replacement verifies the download, persists selection, removes only old summary weights and restores its catalog offline")
 
         let downloadGate = QueueCheckGate()
         let sharedAssets = LocalModelAssets(root: root.appendingPathComponent("shared-assets"), downloader: WaitingFixtureDownloader(data: fixtureWeights, gate: downloadGate))

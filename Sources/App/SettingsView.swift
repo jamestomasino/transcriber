@@ -78,8 +78,7 @@ struct SettingsView: View {
                     Picker("Whisper model", selection: binding(\.whisperModel)) {
                         ForEach(WhisperCatalog.selectable, id: \.id) { Text($0.displayName).tag($0.id) }
                     }
-                    TextField("Terminology hints (drug names, trials, acronyms)", text: binding(\.transcriptionVocabulary))
-                    Text("Use a short, comma-separated list of relevant terms. Large v3 prioritizes accuracy; Turbo is faster. These are general speech models, not clinically validated pharma models. Speaker labels remain approximate.")
+                    Text("Large v3 prioritizes accuracy; Turbo is faster. Speaker labels remain approximate.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 if vm.settings.transcriptionBackend == .local {
@@ -89,6 +88,41 @@ struct SettingsView: View {
                 }
                 if vm.settings.transcriptionBackend == .deepgram {
                     APIKeyRow(title: "Deepgram API key", keyID: "deepgram_api_key")
+                }
+            }
+
+            Section("Local vocabulary") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Names, organizations, products, projects and acronyms")
+                    ZStack(alignment: .topLeading) {
+                        if vm.settings.transcriptionVocabulary.isEmpty {
+                            Text("Acme\nProject Atlas\nNorthstar")
+                                .foregroundStyle(.tertiary)
+                                .padding(.horizontal, 5).padding(.vertical, 8)
+                                .allowsHitTesting(false)
+                        }
+                        TextEditor(text: binding(\.transcriptionVocabulary))
+                            .scrollContentBackground(.hidden)
+                            .frame(height: 110)
+                            .accessibilityLabel("Local vocabulary words")
+                    }
+                    .background(.background)
+                    .overlay(RoundedRectangle(cornerRadius: 5).stroke(.quaternary))
+                    Text("Enter one name per line, using its correct spelling. Commas and semicolons also work. Saved automatically on this Mac and reused for Whisper transcription.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    let vocabulary = TranscriptionVocabulary(vm.settings.transcriptionVocabulary)
+                    Text("\(vocabulary.terms.count) saved · \(vocabulary.includedTerms.count) in the transcription hint")
+                        .font(.caption).foregroundStyle(.secondary)
+                    if vocabulary.omittedCount > 0 {
+                        Text("\(vocabulary.omittedCount) terms exceed the \(TranscriptionVocabulary.promptCharacterLimit)-character hint budget. Put the most relevant names first or shorten the list.")
+                            .font(.caption).foregroundStyle(.orange)
+                    }
+                    if vm.settings.transcriptionBackend != .whisper {
+                        Text("Select Whisper to use this vocabulary. It stays saved when using other backends.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Text("Names are spelling hints, not guaranteed corrections. Changes apply to future transcriptions and ‘Transcribe again’ when audio is retained. Existing transcripts and summary-only retries stay as written.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
             }
 
@@ -104,9 +138,7 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else if vm.settings.summaryBackend == .localModel {
-                    Picker("Summary model", selection: binding(\.summaryModel)) {
-                        ForEach(SummaryModelCatalog.all, id: \.id) { Text($0.displayName).tag($0.id) }
-                    }
+                    SummaryModelSelectionView(vm: vm)
                     Text("8 GB or more recommended. The context is bounded to keep memory use predictable; long meetings are processed in complete sections.")
                         .font(.caption).foregroundStyle(.secondary)
                 } else {

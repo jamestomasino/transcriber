@@ -11,6 +11,26 @@ struct LocalInferenceChecks {
     }
     static func run() async throws {
         let arguments = CommandLine.arguments
+        if arguments.contains("--catalog") {
+            let memory = ProcessInfo.processInfo.physicalMemory
+            let found = try await SummaryModelScanner().scan(memoryBytes: memory)
+            guard found.allSatisfy({ $0.isTrusted && SummaryModelFit.fits($0, memoryBytes: memory) }) else {
+                throw LocalInferenceError("A catalog entry was not pinned or did not fit this Mac")
+            }
+            print("✓ Live model discovery returned \(found.count) pinned choices for this Mac, without downloading weights")
+            for option in found { print("\(option.asset.displayName); \(option.asset.sizeBytes) bytes; \(option.architecture)") }
+            return
+        }
+        if arguments.contains("--probe-current") {
+            let option = SummaryModelOption.current
+            try await LocalInferenceQueue.shared.run {
+                let model = try await LocalModelAssets.shared.ensure(option.asset)
+                let runtime = try await LocalModelAssets.shared.runtime(whisper: false)
+                try await SummaryModelProbe.check(option: option, model: model, runtime: runtime)
+            }
+            print("✓ The real cached summary model passes the new switch-time local check; no settings or weights were removed")
+            return
+        }
         let skipWhisper = arguments.contains("--summary-only")
         let skipSummary = arguments.contains("--whisper-only")
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("transcriber-local-check-\(UUID().uuidString)")

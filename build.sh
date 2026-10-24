@@ -49,6 +49,8 @@ APP_SRC=(
   Sources/App/LocalModelAssets.swift
   Sources/App/WhisperTranscriber.swift
   Sources/App/LocalSummaryServer.swift
+  Sources/App/SummaryModelManager.swift
+  Sources/App/LocalSpeakerDiarizer.swift
   Sources/App/LocalModelSetupView.swift
   Sources/App/ProcessorFactory.swift
   Sources/App/Notifications.swift
@@ -282,7 +284,7 @@ if [ "$MODE" = "test" ]; then
   echo "==> Building + running media checks"
   swiftc -parse-as-library -I Sources/CWhisper/include -target "$TARGET" -sdk "${WORKING_SDK:-$DEFAULT_SDK}" \
     -o "${BUILD}/app-checks" "${CORE_SRC[@]}" \
-    Sources/App/AppStorage.swift Sources/App/AudioPreparation.swift Sources/App/LocalTranscriber.swift Sources/App/SystemAudioTap.swift Sources/App/LocalModelAssets.swift Sources/App/WhisperTranscriber.swift Sources/App/LocalSummaryServer.swift Validation/AppChecks.swift
+    Sources/App/AppStorage.swift Sources/App/AudioPreparation.swift Sources/App/LocalTranscriber.swift Sources/App/SystemAudioTap.swift Sources/App/LocalModelAssets.swift Sources/App/WhisperTranscriber.swift Sources/App/LocalSummaryServer.swift Sources/App/SummaryModelManager.swift Sources/App/HTTPClient.swift Sources/App/LocalSpeakerDiarizer.swift Validation/AppChecks.swift
   "${BUILD}/app-checks"
   echo
   echo "    Tests: ${BUILD}/tests"

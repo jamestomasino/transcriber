@@ -49,9 +49,23 @@ Guidance for agents (and humans) working in this repo.
   idle prompt caching, agent tools, web UI and prompt logging.
 - Save an opted-in transcript before summarization so summary retries can reuse
   it. Model downloads and caches are separate from retained meeting artifacts.
+- Local speaker identities must come from acoustic segmentation and embeddings,
+  never from pauses alone. Infer counts automatically; do not expose manual
+  count overrides or speaker-repair controls. Keep voice matching meeting-local
+  and preserve text, timing and summary on speaker-only updates. Unknown segments
+  do not add speakers.
+- Speaker-analysis WAVs are managed transients, including when source audio is
+  retained. Remove them on every exit and sweep interrupted derived audio on
+  startup without deleting original recordings.
 - [docs/LOCAL_MODELS.md](docs/LOCAL_MODELS.md) is the current model profile,
   asset lifecycle and validation reference. Historical alternatives in PLAN.md
   do not override this standard.
+- Summary model scans are explicit, metadata-only checks of trusted publishers.
+  Pin discovered revisions/sizes/hashes and validate persisted descriptors.
+  Fit recommendations are estimates; a new model must pass a local runtime/task
+  check before activation. Persist its catalog and selected ID before removing
+  previous weights. Cancellation/failure must preserve the working model. Keep
+  replacement serialized with inference and reject activation during meetings.
 
 ## Conventions
 

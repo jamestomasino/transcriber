@@ -18,6 +18,7 @@ import Foundation
 public struct CapturedAudio: Equatable, Sendable {
     public static let preparedFileName = "mixed.m4a"
     public static let speechSectionFileName = "speech-section.caf"
+    public static let speakerAudioFileName = "speaker-analysis.wav"
     /// File URLs per source that actually captured something.
     public var fileURLs: [AudioSource: URL]
     public var startOffsets: [AudioSource: TimeInterval]
@@ -341,7 +342,20 @@ public struct MeetingArtifacts: MeetingArtifactManaging {
     public init() {}
 
     public func sweep(liveIDs: Set<UUID>) -> [URL] {
-        RecordingsDirectory.orphanDirectories(liveIDs: liveIDs).filter {
+        // An interrupted inference can leave a derived recording in a live
+        // meeting folder. Remove only our known transient names; original
+        // mic/system tracks and foreign folders are never swept here.
+        if let entries = try? FileManager.default.contentsOfDirectory(at: RecordingsDirectory.base(),
+            includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
+            for directory in entries {
+                guard let id = RecordingsDirectory.meetingID(inDirectoryName: directory.lastPathComponent),
+                      liveIDs.contains(id),
+                      (try? directory.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { continue }
+                try? remove([CapturedAudio.preparedFileName, CapturedAudio.speechSectionFileName, CapturedAudio.speakerAudioFileName]
+                    .map { directory.appendingPathComponent($0) })
+            }
+        }
+        return RecordingsDirectory.orphanDirectories(liveIDs: liveIDs).filter {
             do { try FileManager.default.removeItem(at: $0); return true }
             catch { return false }
         }

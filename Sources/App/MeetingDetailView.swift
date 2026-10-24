@@ -35,10 +35,10 @@ struct MeetingDetailView: View {
                 Divider()
                 if live?.status == .failed {
                     failedBody
-                } else if let s = live?.summary {
-                    summaryBody(s)
                 } else if live?.status == .processing || live?.status == .recording {
                     inFlightBody
+                } else if let s = live?.summary {
+                    summaryBody(s)
                 } else {
                     emptyBody
                 }
@@ -73,7 +73,7 @@ struct MeetingDetailView: View {
                 Label(dateString, systemImage: "calendar")
                 Label(durationString, systemImage: "clock")
                 if let n = live?.speakerCount, n > 0 {
-                    Label("\(n) speaker\(n == 1 ? "" : "s")", systemImage: "person.2")
+                    Label(live?.speakerAttribution == .unverified ? "Speaker labels unverified" : "\(n) \(live?.speakerAttribution == .voiceClustering ? "estimated " : "")speaker\(n == 1 ? "" : "s")", systemImage: "person.2")
                 }
             }
             .font(.callout)
@@ -193,11 +193,18 @@ struct MeetingDetailView: View {
     private var inFlightBody: some View {
         HStack(spacing: 10) {
             ProgressView()
-            Text(live?.status == .recording
+            VStack(alignment: .leading, spacing: 6) {
+                Text(live?.status == .recording
                  ? "Recording — stop the meeting to generate a summary."
                  : (vm.progressByMeeting[meeting.id]?.stage.rawValue.capitalized ?? "Working on it") + "…")
                 .font(.callout)
                 .foregroundStyle(.secondary)
+                if let progress = vm.progressByMeeting[meeting.id], progress.stage == .diarizing, progress.fraction > 0 {
+                    ProgressView(value: progress.fraction)
+                    Text("Matching voices: \(Int(progress.fraction * 100))%")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
         }
     }
 
@@ -232,12 +239,12 @@ struct MeetingDetailView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(retrying)
-                if live?.transcript.isEmpty == false, live?.audioFileURLs.isEmpty == false {
-                    Button("Transcribe again") {
-                        retrying = true
-                        Task { await vm.retry(id: meeting.id, reuseTranscript: false); retrying = false }
-                    }.disabled(retrying)
-                }
+            }
+            if (live?.status == .failed || live?.status == .summarized), live?.audioFileURLs.isEmpty == false {
+                Button("Transcribe again") {
+                    retrying = true
+                    Task { await vm.retry(id: meeting.id, reuseTranscript: false); retrying = false }
+                }.disabled(retrying)
             }
             if let s = live?.summary, !s.overall.isEmpty {
                 Button {

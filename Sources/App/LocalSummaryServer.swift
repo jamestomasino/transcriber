@@ -64,16 +64,21 @@ struct DownloadedModelSummarizer: Summarizer {
         guard ProcessInfo.processInfo.physicalMemory >= SummaryModelCatalog.minimumMemoryBytes else {
             throw LocalInferenceError("The downloadable summary model needs at least 8 GB of memory. Choose another backend in Settings.")
         }
-        guard let spec = SummaryModelCatalog.spec(id: modelID) else { throw LocalInferenceError("Choose a supported local summary model in Settings.") }
-        let model = try await LocalModelAssets.shared.ensure(spec)
-        let runtime = try await LocalModelAssets.shared.runtime(whisper: false)
         return try await LocalInferenceQueue.shared.run {
+            let option = try await SummaryModelRegistry.shared.option(id: modelID)
+            guard SummaryModelFit.fits(option, memoryBytes: ProcessInfo.processInfo.physicalMemory) else {
+                throw LocalInferenceError("The selected summary model needs more memory than this Mac has. Choose a smaller model in Settings.")
+            }
+            let model = try await LocalModelAssets.shared.ensure(option.asset)
+            let runtime = try await LocalModelAssets.shared.runtime(whisper: false)
             let server = try LocalSummaryServer(executable: runtime, model: model)
             defer { server.stop() }
             try await server.waitUntilReady()
             let inner = LocalJSONSummarizer(model: modelID, http: UnixModelHTTPClient(socket: server.socketURL))
-            return try await ChunkingSummarizer(inner: inner, transcriptBudget: SummaryModelCatalog.transcriptBudget)
+            var summary = try await ChunkingSummarizer(inner: inner, transcriptBudget: SummaryModelCatalog.transcriptBudget)
                 .summarize(segments: segments, title: title)
+            summary.model = option.asset.displayName
+            return summary
         }
     }
 }

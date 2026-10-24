@@ -20,6 +20,12 @@ public enum MeetingStatus: String, Codable, Sendable {
     case failed
 }
 
+public enum SpeakerAttribution: String, Codable, Sendable {
+    case unverified
+    case voiceClustering
+    case provider
+}
+
 /// One attributed utterance in a transcript.
 public struct TranscriptSegment: Codable, Equatable, Sendable {
     public var speaker: String
@@ -149,6 +155,7 @@ public struct Meeting: Codable, Equatable, Identifiable, Sendable {
     public var audioStartOffsets: [AudioSource: TimeInterval]
     public var transcript: [TranscriptSegment]
     public var speakerCount: Int
+    public var speakerAttribution: SpeakerAttribution
 
     // Retained.
     public var summary: MeetingSummary?
@@ -168,6 +175,7 @@ public struct Meeting: Codable, Equatable, Identifiable, Sendable {
         audioStartOffsets: [AudioSource: TimeInterval] = [:],
         transcript: [TranscriptSegment] = [],
         speakerCount: Int = 0,
+        speakerAttribution: SpeakerAttribution = .unverified,
         summary: MeetingSummary? = nil,
         failureReason: String? = nil,
         pendingArtifactDeletion: [URL] = []
@@ -184,6 +192,7 @@ public struct Meeting: Codable, Equatable, Identifiable, Sendable {
         self.audioStartOffsets = audioStartOffsets
         self.transcript = transcript
         self.speakerCount = speakerCount
+        self.speakerAttribution = speakerAttribution
         self.summary = summary
         self.failureReason = failureReason
         self.pendingArtifactDeletion = pendingArtifactDeletion
@@ -192,6 +201,7 @@ public struct Meeting: Codable, Equatable, Identifiable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case id, title, status, startedAt, stoppedAt, duration, createdAt, lastActivityAt
         case audioFileURLs, audioStartOffsets, transcript, speakerCount, summary, failureReason, pendingArtifactDeletion
+        case speakerAttribution
     }
 
     public init(from decoder: Decoder) throws {
@@ -208,6 +218,7 @@ public struct Meeting: Codable, Equatable, Identifiable, Sendable {
         audioStartOffsets = try d.decodeIfPresent([AudioSource: TimeInterval].self, forKey: .audioStartOffsets) ?? [:]
         transcript = try d.decodeIfPresent([TranscriptSegment].self, forKey: .transcript) ?? []
         speakerCount = try d.decodeIfPresent(Int.self, forKey: .speakerCount) ?? 0
+        speakerAttribution = try d.decodeIfPresent(SpeakerAttribution.self, forKey: .speakerAttribution) ?? .unverified
         summary = try d.decodeIfPresent(MeetingSummary.self, forKey: .summary)
         failureReason = try d.decodeIfPresent(String.self, forKey: .failureReason)
         pendingArtifactDeletion = try d.decodeIfPresent([URL].self, forKey: .pendingArtifactDeletion) ?? []

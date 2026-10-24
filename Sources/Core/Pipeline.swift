@@ -42,15 +42,17 @@ public struct ProcessingProgress: Equatable, Sendable {
 public struct ProcessedResult: Equatable, Sendable {
     public var segments: [TranscriptSegment]
     public var summary: MeetingSummary
+    public var speakerAttribution: SpeakerAttribution
 
-    public init(segments: [TranscriptSegment], summary: MeetingSummary) {
+    public init(segments: [TranscriptSegment], summary: MeetingSummary, speakerAttribution: SpeakerAttribution = .unverified) {
         self.segments = segments
         self.summary = summary
+        self.speakerAttribution = speakerAttribution
     }
 
     /// Number of distinct speakers in the transcript.
     public var speakerCount: Int {
-        Set(segments.map { $0.speaker }).count
+        Set(segments.map { $0.speaker }.filter { $0 != SpeakerAlignment.unknownSpeaker }).count
     }
 }
 
@@ -61,19 +63,24 @@ public protocol MeetingProcessor: Sendable {
     func process(
         meeting: Meeting,
         audio: CapturedAudio,
-        report: @Sendable (ProcessingProgress) -> Void
+        report: @escaping @Sendable (ProcessingProgress) -> Void
     ) async throws -> ProcessedResult
 }
 
 /// Pipelines can durably checkpoint an opted-in transcript before summarization.
 /// The async acknowledgement prevents a summary failure from losing completed work.
 public protocol TranscriptCheckpointingProcessor: MeetingProcessor {
+    var speakerAttribution: SpeakerAttribution { get }
     func process(
         meeting: Meeting,
         audio: CapturedAudio,
-        report: @Sendable (ProcessingProgress) -> Void,
+        report: @escaping @Sendable (ProcessingProgress) -> Void,
         checkpoint: @Sendable ([TranscriptSegment]) async throws -> Void
     ) async throws -> ProcessedResult
+}
+
+extension TranscriptCheckpointingProcessor {
+    public var speakerAttribution: SpeakerAttribution { .unverified }
 }
 
 // MARK: - Component seams
@@ -90,6 +97,17 @@ public protocol Diarizer: Sendable {
     func diarize(_ segments: [TranscriptSegment]) async throws -> [TranscriptSegment]
 }
 
+/// Audio stays behind this injected seam; Core only passes managed source URLs.
+public protocol AudioDiarizer: Diarizer {
+    func diarize(_ segments: [TranscriptSegment], audio: CapturedAudio,
+                 report: @escaping @Sendable (ProcessingProgress) -> Void) async throws -> [TranscriptSegment]
+}
+
+public protocol SpeakerReprocessing: MeetingProcessor {
+    func reprocessSpeakers(meeting: Meeting, audio: CapturedAudio,
+                          report: @escaping @Sendable (ProcessingProgress) -> Void) async throws -> ProcessedResult
+}
+
 /// Turn a speaker-labeled transcript into a structured summary.
 public protocol Summarizer: Sendable {
     func summarize(segments: [TranscriptSegment], title: String) async throws -> MeetingSummary
@@ -103,28 +121,31 @@ public protocol Summarizer: Sendable {
 // cloud backend (provider transcriber that already diarizes + LLM summarizer)
 // both fit the same contract.
 
-public struct PipelineProcessor: TranscriptCheckpointingProcessor {
+public struct PipelineProcessor: TranscriptCheckpointingProcessor, SpeakerReprocessing {
     public let transcriber: any Transcriber
     public let diarizer: any Diarizer
     public let summarizer: any Summarizer
     public let language: String
+    public let speakerAttribution: SpeakerAttribution
 
     public init(
         transcriber: any Transcriber,
         diarizer: any Diarizer,
         summarizer: any Summarizer,
-        language: String = ""
+        language: String = "",
+        speakerAttribution: SpeakerAttribution = .unverified
     ) {
         self.transcriber = transcriber
         self.diarizer = diarizer
         self.summarizer = summarizer
         self.language = language
+        self.speakerAttribution = speakerAttribution
     }
 
     public func process(
         meeting: Meeting,
         audio: CapturedAudio,
-        report: @Sendable (ProcessingProgress) -> Void
+        report: @escaping @Sendable (ProcessingProgress) -> Void
     ) async throws -> ProcessedResult {
         try await process(meeting: meeting, audio: audio, report: report, checkpoint: { _ in })
     }
@@ -132,7 +153,7 @@ public struct PipelineProcessor: TranscriptCheckpointingProcessor {
     public func process(
         meeting: Meeting,
         audio: CapturedAudio,
-        report: @Sendable (ProcessingProgress) -> Void,
+        report: @escaping @Sendable (ProcessingProgress) -> Void,
         checkpoint: @Sendable ([TranscriptSegment]) async throws -> Void
     ) async throws -> ProcessedResult {
         let segments: [TranscriptSegment]
@@ -154,7 +175,11 @@ public struct PipelineProcessor: TranscriptCheckpointingProcessor {
                 throw LLMError("Very little speech was recognized for this long recording. Audio was kept; check your audio sources and transcription backend in Settings, then retry.")
             }
             report(ProcessingProgress(stage: .diarizing, fraction: 0))
-            segments = try await diarizer.diarize(raw)
+            if let acoustic = diarizer as? any AudioDiarizer {
+                segments = try await acoustic.diarize(raw, audio: audio, report: report)
+            } else {
+                segments = try await diarizer.diarize(raw)
+            }
 
         }
         try Task.checkCancellation()
@@ -168,7 +193,50 @@ public struct PipelineProcessor: TranscriptCheckpointingProcessor {
         }
         try Summary.validateDetail(summary, segments: segments)
         report(ProcessingProgress(stage: .summarizing, fraction: 1))
-        return ProcessedResult(segments: segments, summary: summary)
+        return ProcessedResult(segments: segments, summary: summary,
+                               speakerAttribution: meeting.transcript.isEmpty ? speakerAttribution : meeting.speakerAttribution)
+    }
+
+    public func reprocessSpeakers(meeting: Meeting, audio: CapturedAudio,
+                                 report: @escaping @Sendable (ProcessingProgress) -> Void) async throws -> ProcessedResult {
+        guard let acoustic = diarizer as? any AudioDiarizer, let summary = meeting.summary else {
+            throw LLMError("Speaker-only updates require a local audio diarizer and a saved summary.")
+        }
+        let segments = try await acoustic.diarize(meeting.transcript, audio: audio, report: report)
+        return ProcessedResult(segments: segments, summary: summary, speakerAttribution: speakerAttribution)
+    }
+}
+
+/// Match whole transcript segments by total overlap with acoustic speaker turns.
+/// Preserve every word and timestamp; a pause alone never creates an identity.
+public struct SpeakerTurn: Equatable, Sendable {
+    public let start: TimeInterval
+    public let end: TimeInterval
+    public let speaker: Int
+    public init(start: TimeInterval, end: TimeInterval, speaker: Int) {
+        self.start = start; self.end = end; self.speaker = speaker
+    }
+}
+
+public enum SpeakerAlignment {
+    public static let unknownSpeaker = "Unknown speaker"
+    public static func label(_ segments: [TranscriptSegment], turns: [SpeakerTurn]) -> [TranscriptSegment] {
+        let valid = turns.filter { $0.start.isFinite && $0.end.isFinite && $0.start >= 0 && $0.end > $0.start && $0.speaker >= 0 }
+            .sorted { $0.start == $1.start ? $0.speaker < $1.speaker : $0.start < $1.start }
+        var identities: [Int: Int] = [:]
+        for turn in valid where identities[turn.speaker] == nil { identities[turn.speaker] = identities.count + 1 }
+        return segments.map { segment in
+            var weights: [Int: Double] = [:]
+            for turn in valid where turn.start < segment.endOffset && turn.end > segment.startOffset {
+                weights[turn.speaker, default: 0] += max(0, min(turn.end, segment.endOffset) - max(turn.start, segment.startOffset))
+            }
+            let best = weights.keys.sorted {
+                weights[$0] == weights[$1] ? identities[$0]! < identities[$1]! : weights[$0]! > weights[$1]!
+            }.first
+            var copy = segment
+            copy.speaker = best.map { "Speaker \(identities[$0]!)" } ?? unknownSpeaker
+            return copy
+        }
     }
 }
 
@@ -186,11 +254,9 @@ public struct IdentityDiarizer: Diarizer {
 
 // MARK: - Heuristic diarizer
 //
-// Apple Speech does not separate speakers. This is the documented local
-// fallback: it assigns "Speaker N" labels by grouping consecutive segments
-// that are close in time into one speaker and starting a new speaker after a
-// gap. It is *best-effort* — accurate speaker ID is a cloud-provider feature —
-// but it gives the local path a sane, labeled transcript instead of one blob.
+// Legacy pause grouping, retained for compatibility/testing. These labels
+// describe turn groups, not measured speaker identities. Production local
+// pipelines use an injected AudioDiarizer with acoustic models instead.
 //
 // Pure and deterministic, so it is unit-testable in Core.
 

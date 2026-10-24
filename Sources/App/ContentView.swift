@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 #if canImport(TranscriberCore)
 import TranscriberCore
@@ -77,11 +78,9 @@ struct ContentView: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            Image(systemName: vm.isRecording ? "record.circle.fill" : "waveform.circle.fill")
-                .font(.title2)
-                .foregroundStyle(vm.isRecording ? Color.red : Color.accentColor)
-            Text("Transcriber")
-                .font(.title2.bold())
+            AppIconView()
+                .frame(width: 28, height: 28)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
             Spacer()
             Button { showSetup = true } label: { Image(systemName: "questionmark.circle") }
                 .help("Setup and permissions")
@@ -273,6 +272,25 @@ private struct LevelBar: View {
                 }
             }
             .frame(height: 8)
+        }
+    }
+}
+
+// MARK: - App icon
+
+/// The app's own icon, loaded from the bundle so it always matches the
+/// Dock / Finder icon the user sees. Falls back to an SF Symbol if the
+/// icon can't be resolved (e.g. running from a bare binary in tests).
+private struct AppIconView: View {
+    var body: some View {
+        if let image = NSApp.applicationIconImage {
+            Image(nsImage: image)
+                .resizable()
+                .interpolation(.high)
+        } else {
+            Image(systemName: "waveform.circle.fill")
+                .resizable()
+                .foregroundStyle(Color.accentColor)
         }
     }
 }

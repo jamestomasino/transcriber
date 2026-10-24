@@ -67,6 +67,10 @@ struct TranscriberApp: App {
         if arguments.contains("--validate-local-speech") {
             Task { await Self.validateLocalSpeech() }
         }
+        if let index = arguments.firstIndex(of: "--relabel-speakers"), arguments.indices.contains(index + 1),
+           let id = UUID(uuidString: arguments[index + 1]) {
+            Task { @MainActor in _ = await model.reprocessSpeakers(id: id) }
+        }
         // Ask for the banner permission once, on launch, so the first finished
         // meeting can actually post. Idempotent — macOS won't re-prompt after
         // the user has decided.

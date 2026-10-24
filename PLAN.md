@@ -15,12 +15,14 @@ only the **summary** — deleting the audio and the transcript.
 > resource profile and validation limits. Earlier sections preserve design history.
 >
 > Phases 0–7 and the local model pivot are implemented. The CLT-only build and
-> SDK fallback remain required. `bash build.sh test` passes 394 assertions and
+> SDK fallback remain required. `bash build.sh test` passes 439 assertions and
 > real media, cache, transport and cleanup checks. Live checks exercised local
 > Whisper pharma terms and a real recording excerpt; the downloaded summarizer
-> recovered a real meeting from its retained transcript. A complete long meeting
-> transcribed and summarized with both downloaded backends remains a separate
-> acceptance check. See [Validation/README.md](Validation/README.md).
+> recovered a real meeting from its retained transcript. A subsequent complete
+> 37-minute recording passed both downloaded stages with saved vocabulary:
+> 6,180 transcript words, improved name spellings and a durable new summary.
+> This is one observed run, not a ground-truth accuracy evaluation.
+> See [Validation/README.md](Validation/README.md).
 
 This plan is written to be implemented on top of the `timetracker` repo: same
 architecture, same build system, same conventions. Where it differs, the
@@ -874,3 +876,52 @@ memory, and preserve the durable-summary-before-deletion contract. The standard
 private helper lifecycle and acceptance coverage are maintained in
 [docs/LOCAL_MODELS.md](docs/LOCAL_MODELS.md). New changes should follow that
 reference and AGENTS.md rather than the superseded default recommendations.
+
+## 25. Local vocabulary — 24 October 2026
+
+Settings has a dedicated Local vocabulary section for canonical names,
+organizations, products, projects and acronyms. Save one name per line (comma/semicolon lists
+also work) in the existing local `transcriptionVocabulary` setting. Preserve
+existing hints and do not populate the user's list from meeting content.
+
+Whisper receives normalized, case-insensitively deduplicated names in saved
+order, within the existing 1,000-character hint budget. Keep whole terms; show
+saved/included counts and warn when terms do not fit. These hints guide future
+transcription and explicit retranscription of retained audio. They are not
+automatic replacements and do not modify saved transcripts or summary retries.
+Other transcription backends preserve the setting but do not consume it.
+
+An explicit **Transcribe again** also works on completed meetings with retained
+audio, rerunning both stages with current settings. Ordinary retry does not
+restart completed meetings, and completed meetings without source audio stay
+unchanged. Keep the old result until replacement stages succeed.
+
+## 26. Acoustic speaker matching — 24 October 2026
+
+Replace the production local pause-grouping heuristic with downloaded speaker
+segmentation and voice embeddings using sherpa-onnx. A pause is not evidence of
+a new identity. Keep model/runtime downloads pinned and cached, serialize the
+stage with other local inference, and retain the CLT-only build.
+
+Speaker labels are meeting-local voice clusters, not cross-meeting profiles or
+participant names. Persist attribution provenance; legacy guessed counts are
+unverified. Infer the count automatically without manual count controls or a
+speaker-repair button. An internal diagnostic rerun can reuse retained audio
+and transcript, preserving text, timing and summary. Ignore legacy count hints. Keep
+temporary WAVs in the managed retention path and always remove them. See the
+local-model profile for resource bounds, model sources and validation limits.
+
+## 27. Discoverable summary models — 24 October 2026
+
+Add an explicit Settings check for trusted Qwen GGUF releases, immutable model
+metadata and a cached catalog. Recommend estimated fits using memory headroom,
+architecture support, parameter balance and version; never automatically replace
+the selected model or claim general accuracy from release recency.
+
+Download & switch verifies and runs a synthetic local notes check, durably saves
+the descriptor/selection, then deletes only the previous summary weights. Failed
+or cancelled preparation/settings saves keep the working model. Serialize with
+inference, guard recording/processing and stale settings at activation, preserve
+the last downloaded selection across provider changes, and keep offline model
+resolution independent of the latest server catalog. New architectures may need
+a runtime/app update. Speech and speaker assets remain separately pinned.

@@ -37,6 +37,7 @@ For isolated UI inspection:
 ```bash
 bash Validation/run.sh preview --empty  # onboarding
 bash Validation/run.sh preview          # seeded summary detail
+bash Validation/run.sh preview --settings # local vocabulary and settings
 ```
 
 The preview uses in-memory meetings/settings and a no-op artifact manager. It
@@ -87,6 +88,8 @@ Downloaded local model validation is opt-in:
 ```bash
 bash Validation/run.sh models --whisper-only
 bash Validation/run.sh models --summary-only
+bash Validation/run.sh models --catalog       # public metadata only; no weights downloaded
+bash Validation/run.sh models --probe-current # switch-time synthetic check on the cached default
 ```
 
 These checks download missing pinned public weights, then process synthetic
@@ -95,3 +98,21 @@ memory without logging transcripts. `--meeting <UUID> --whisper-only` explicitly
 checks a real retained recording excerpt; its transient audio stays in the
 managed recording directory and is removed. Model download buttons are disabled
 in the isolated UI preview. See [the model profile](../docs/LOCAL_MODELS.md).
+
+For an explicitly requested full rerun, quit the normal app and launch it with
+`open -n build/Transcriber.app --args --retranscribe-meeting <UUID>`. This uses
+the user's current settings and updates the real meeting. Completed meetings
+require retained audio; ordinary `--retry-meeting` does not restart them. The
+same action is available as **Transcribe again** in the meeting detail view.
+The 24 October acceptance run processed a complete 37-minute recording through
+Whisper and the downloaded summarizer with saved vocabulary; see the model
+profile for measured timings, outputs and accuracy limits.
+
+Internal speaker-only diagnostics use `--relabel-speakers <UUID>` with automatic
+count detection. This is an explicit real
+meeting update, requires retained audio and transcript, and preserves transcript
+wording, timing and the saved summary. There is no manual count picker or
+speaker-update button in the product. Legacy saved count hints are ignored. Normal launches
+do not rerun speaker matching. The default harness tests acoustic overlap
+assignment, returning identities, unknown labels, metadata persistence, failure
+preservation, managed PCM preparation and helper completion/cancellation.

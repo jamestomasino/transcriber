@@ -552,6 +552,68 @@ do {
     check(false, "pipeline composition: \(error)")
 }
 
+section("acoustic speaker alignment and safe speaker-only updates")
+do {
+    let original = [
+        TranscriptSegment(speaker: "Speaker 1", text: "First speaker.", startOffset: 0, endOffset: 2),
+        TranscriptSegment(speaker: "Speaker 2", text: "Second speaker.", startOffset: 4, endOffset: 6),
+        TranscriptSegment(speaker: "Speaker 43", text: "First speaker returns.", startOffset: 60, endOffset: 62),
+        TranscriptSegment(speaker: "Speaker 44", text: "Unmatched.", startOffset: 70, endOffset: 71)
+    ]
+    let turns = [SpeakerTurn(start: 0, end: 2, speaker: 9), SpeakerTurn(start: 4, end: 6, speaker: 3),
+                 SpeakerTurn(start: 60, end: 62, speaker: 9), SpeakerTurn(start: .nan, end: 90, speaker: 1)]
+    let labeled = SpeakerAlignment.label(original, turns: turns)
+    check(labeled.map(\.speaker) == ["Speaker 1", "Speaker 2", "Speaker 1", "Unknown speaker"],
+          "returning voices share identities across long pauses; unmatched text stays unassigned")
+    check(zip(original, labeled).allSatisfy { $0.text == $1.text && $0.startOffset == $1.startOffset && $0.endOffset == $1.endOffset },
+          "acoustic alignment preserves every transcript word and timestamp")
+    check(ProcessedResult(segments: labeled, summary: MeetingSummary(overall: "Notes")).speakerCount == 2,
+          "unknown labels do not inflate speaker counts")
+    let overlap = SpeakerAlignment.label([TranscriptSegment(speaker: "?", text: "Mixed turn", startOffset: 0, endOffset: 10)],
+        turns: [SpeakerTurn(start: 0, end: 2, speaker: 4), SpeakerTurn(start: 2, end: 7, speaker: 5), SpeakerTurn(start: 7, end: 10, speaker: 4)])
+    check(overlap[0].speaker == "Speaker 1", "overlap is aggregated by identity and ties resolve by first appearance")
+
+    final class AcousticFixture: AudioDiarizer, @unchecked Sendable {
+        var calls = 0
+        var shouldFail = false
+        func diarize(_ segments: [TranscriptSegment]) async throws -> [TranscriptSegment] { throw LLMError("Audio required") }
+        func diarize(_ segments: [TranscriptSegment], audio: CapturedAudio,
+                     report: @escaping @Sendable (ProcessingProgress) -> Void) async throws -> [TranscriptSegment] {
+            calls += 1
+            check(!audio.isEmpty, "speaker-only updates receive the original audio")
+            if shouldFail { throw LLMError("Injected voice matching failure") }
+            return SpeakerAlignment.label(segments, turns: [SpeakerTurn(start: 0, end: 2, speaker: 9),
+                SpeakerTurn(start: 4, end: 6, speaker: 3), SpeakerTurn(start: 60, end: 62, speaker: 9)])
+        }
+    }
+    let acoustic = AcousticFixture()
+    let summary = MeetingSummary(overall: "Existing notes", actionItems: ["Alex: review Friday."], model: "Existing model")
+    let meeting = Meeting(title: "Speaker repair", status: .summarized, startedAt: t0, createdAt: t0, lastActivityAt: t0,
+        audioFileURLs: [.mic: suiteRecordings.appendingPathComponent("speaker-fixture.caf")], transcript: original, speakerCount: 44, summary: summary)
+    let processor = PipelineProcessor(transcriber: StubTranscriber(segs: []), diarizer: acoustic, summarizer: StubSummarizer(), speakerAttribution: .voiceClustering)
+    var repairNotifications: [MeetingNotification] = []
+    let vm = TranscriberViewModel(capture: RecordingAudioCapture(directory: suiteRecordings), processor: processor,
+                                 settingsStore: .inMemory(), meetingStore: .inMemory(initial: [meeting]), notifier: { repairNotifications.append($0) })
+    let updated = await vm.reprocessSpeakers(id: meeting.id)
+    let stored = vm.meeting(id: meeting.id)!
+    check(updated && stored.speakerCount == 2 && stored.speakerAttribution == .voiceClustering,
+          "speaker-only updates infer the count and persist acoustic provenance")
+    check(stored.summary == summary && stored.transcript.map(\.text) == original.map(\.text) && stored.audioFileURLs == meeting.audioFileURLs,
+          "speaker repair preserves summary, transcript wording and retained source references")
+    let roundTrip = try JSONDecoder().decode(Meeting.self, from: JSONEncoder().encode(stored))
+    check(roundTrip == stored, "speaker attribution survives persistence")
+    var legacy = try JSONSerialization.jsonObject(with: JSONEncoder().encode(stored)) as! [String: Any]
+    legacy["expectedSpeakerCount"] = 7
+    let legacyDecoded = try JSONDecoder().decode(Meeting.self, from: JSONSerialization.data(withJSONObject: legacy))
+    check(legacyDecoded == stored, "saved legacy speaker-count hints are ignored instead of constraining automatic detection")
+    acoustic.shouldFail = true
+    let failed = await vm.reprocessSpeakers(id: meeting.id)
+    check(!failed && vm.meeting(id: meeting.id)?.status == .summarized && vm.meeting(id: meeting.id)?.summary == summary && vm.meeting(id: meeting.id)?.transcript == stored.transcript,
+          "failed speaker updates preserve the completed result")
+    check(acoustic.calls == 2, "speaker updates always call acoustic detection")
+    check(repairNotifications.isEmpty, "speaker-only updates do not announce a newly generated or failed summary")
+} catch { check(false, "speaker matching: \(error)") }
+
 // MARK: - Phase 4: heuristic diarizer
 section("diarizer: heuristic speaker splitting")
 do {
@@ -634,7 +696,7 @@ do {
 
     // Keep original transcript + audio; the derived mix is always deleted.
     let keepAll = RetentionPolicy(settings: AppSettings(keepTranscriptAfterSummary: true, keepAudioAfterSummary: true))
-    check(Set(keepAll.artifactsToDelete(for: meeting)) == Set([dir.appendingPathComponent(CapturedAudio.preparedFileName), dir.appendingPathComponent(CapturedAudio.speechSectionFileName)]), "keep-all retains originals but deletes transient mix and speech section")
+    check(Set(keepAll.artifactsToDelete(for: meeting)) == Set([dir.appendingPathComponent(CapturedAudio.preparedFileName), dir.appendingPathComponent(CapturedAudio.speechSectionFileName), dir.appendingPathComponent(CapturedAudio.speakerAudioFileName)]), "keep-all retains originals but deletes transient mixes, speech sections and speaker analysis audio")
     check(keepAll.keepTranscript && keepAll.keepAudio, "keep-all flags are set")
 } catch {
     check(false, "retention: \(error)")
@@ -814,6 +876,124 @@ do {
     check(false, "llm: \(error)")
 }
 
+section("local vocabulary spelling hints")
+let localWords = TranscriptionVocabulary(" Tymlos\nParatek, TYmLOS; LEO   Pharma\r\n\nIL-23, café")
+check(localWords.terms == ["Tymlos", "Paratek", "LEO Pharma", "IL-23", "café"],
+      "vocabulary accepts lines and pasted lists, preserves names and removes case-insensitive duplicates")
+check(localWords.prompt == "Tymlos, Paratek, LEO Pharma, IL-23, café" && localWords.omittedCount == 0,
+      "Whisper receives canonical spellings including multiword names")
+check(TranscriptionVocabulary(" \n,; ").prompt.isEmpty, "empty vocabulary supplies no decoder hint")
+let budgetWords = TranscriptionVocabulary(String(repeating: "a", count: 990) + "\nTymlos\nParatek")
+check(budgetWords.includedTerms.count == 2 && budgetWords.omittedCount == 1 && budgetWords.prompt.hasSuffix("Tymlos"),
+      "long vocabulary preserves complete names and exposes excluded terms")
+check(TranscriptionVocabulary(String(repeating: "b", count: 1_001) + "\nTymlos").includedTerms.isEmpty,
+      "overlong first entry respects list priority without emitting a partial name")
+
+section("model discovery, hardware fit and replacement transactions")
+do {
+    let hash = String(repeating: "a", count: 64), revision = String(repeating: "b", count: 40)
+    var metadata: [String: Any] = ["id": "bartowski/Qwen3.8-4B-GGUF", "sha": revision,
+        "lastModified": "2026-10-24T00:00:00Z", "private": false, "gated": false,
+        "gguf": ["architecture": "qwen35", "total": 4_000_000_000, "context_length": 262144, "chat_template": "fixture-template"],
+        "cardData": ["base_model": "Qwen/Qwen3.8-4B", "license": "apache-2.0"],
+        "siblings": [["rfilename": "Qwen3.8-4B-Q4_K_M.gguf", "size": 3_000_000_000,
+                      "lfs": ["sha256": hash, "size": 3_000_000_000]]]]
+    guard let discovered = try SummaryModelDiscovery.option(JSONSerialization.data(withJSONObject: metadata)) else { throw LLMError("Metadata fixture was not discoverable") }
+    check(discovered.isTrusted && discovered.id == "summary-" + hash && discovered.asset.url.path.contains("/resolve/\(revision)/"),
+          "future model discovery pins exact revision, SHA256 and a safe content-addressed ID")
+    check(discovered.version == "3.8" && discovered.parameterBillions == 4, "recommendation metadata comes from the model header")
+    var alternate = discovered
+    alternate.asset.sha256 = String(repeating: "c", count: 64)
+    alternate.asset.id = "summary-" + alternate.asset.sha256!
+    alternate.repository = "Qwen/Qwen3.8-4B-GGUF"
+    alternate.asset.url = URL(string: "https://huggingface.co/\(alternate.repository)/resolve/\(revision)/\(alternate.filename)")!
+    check(alternate.isTrusted && SummaryModelDiscovery.uniqueModels([discovered, alternate]).count == 1,
+          "equivalent conversions from different publishers do not create indistinguishable picker rows")
+    check(SummaryModelDiscovery.uniqueModels([discovered, alternate], selectedID: discovered.id).first?.id == discovered.id,
+          "deduplication preserves the active pinned download rather than silently selecting a different conversion")
+    let eightGB: UInt64 = 8 * 1_024 * 1_024 * 1_024
+    check(SummaryModelFit.fits(.current, memoryBytes: eightGB), "the measured 4B default remains eligible on an 8 GB Mac")
+    var large = discovered
+    large.parameterBillions = 9; large.asset.sizeBytes = 5_800_000_000
+    check(!SummaryModelFit.fits(large, memoryBytes: eightGB) && SummaryModelFit.fits(large, memoryBytes: eightGB * 2),
+          "memory recommendations include inference and OS headroom rather than weights alone")
+    check(SummaryModelFit.ranked([.current, discovered], memoryBytes: eightGB).first?.id == discovered.id,
+          "a newer comparable model can be discovered without an app catalog release")
+    var unsupported = discovered; unsupported.architecture = "future-architecture"
+    check(SummaryModelFit.ranked([unsupported, .current], memoryBytes: eightGB).first?.id == SummaryModelCatalog.defaultID,
+          "an unrecognized architecture does not outrank a known compatible profile")
+    var unsafe = discovered
+    unsafe.asset.url = URL(string: "https://example.invalid/arbitrary-model.gguf")!
+    check(!unsafe.isTrusted, "catalog entries cannot redirect downloads to arbitrary publishers or hosts")
+    unsafe = discovered; unsafe.asset.id = "../../settings"
+    check(!unsafe.isTrusted, "model IDs cannot escape the model cache")
+    metadata["siblings"] = [["rfilename": "Qwen3.8-4B-Q4_K_M.gguf", "size": 3_000_000_000]]
+    check(try SummaryModelDiscovery.option(JSONSerialization.data(withJSONObject: metadata)) == nil,
+          "assets without LFS integrity metadata are not offered")
+    metadata["siblings"] = [["rfilename": "Qwen3.8-4B-Q4_K_M-00001-of-00003.gguf", "size": 3_000_000_000,
+                             "lfs": ["sha256": hash, "size": 3_000_000_000]]]
+    check(try SummaryModelDiscovery.option(JSONSerialization.data(withJSONObject: metadata)) == nil,
+          "incomplete split models are not presented as standalone downloads")
+
+    var events: [String] = []
+    let warning = try await ModelReplacement.perform(prepare: { events.append("download + verify + local check") },
+        activate: { events.append("persist selected model") }, removePrevious: { events.append("delete old weights") }, discardNew: { events.append("rollback") })
+    check(warning == nil && events == ["download + verify + local check", "persist selected model", "delete old weights"],
+          "replacement removes old bytes only after a tested model and selection are durable")
+    events = []
+    do {
+        _ = try await ModelReplacement.perform(prepare: { events.append("failed check"); throw LLMError("Unsupported runtime") },
+            activate: { events.append("activate") }, removePrevious: { events.append("delete old") }, discardNew: { events.append("discard failed new download") })
+        check(false, "failed model check must abort")
+    } catch {
+        check(events == ["failed check", "discard failed new download"], "failed checks preserve the active model and discard only the failed replacement")
+    }
+    events = []
+    do {
+        _ = try await ModelReplacement.perform(prepare: { events.append("verified") },
+            activate: { throw LLMError("Settings save failed") }, removePrevious: { events.append("delete old") }, discardNew: { events.append("rollback") })
+        check(false, "failed activation must abort")
+    } catch { check(events == ["verified", "rollback"], "a failed settings commit cannot delete the previous model") }
+    events = []
+    let cleanup = try await ModelReplacement.perform(prepare: {}, activate: { events.append("new selected") },
+        removePrevious: { throw LLMError("Disk is read-only") }, discardNew: { events.append("discard") })
+    check(cleanup != nil && events == ["new selected"], "cleanup failure preserves the new working selection and reports leftover old bytes")
+    events = []
+    let cancelledSwitch = Task {
+        do {
+            _ = try await ModelReplacement.perform(prepare: { try await Task.sleep(nanoseconds: 1_000_000_000) },
+                activate: { events.append("activate") }, removePrevious: { events.append("delete old") }, discardNew: { events.append("discard new") })
+        } catch is CancellationError {} catch { check(false, "unexpected switch cancellation error") }
+    }
+    cancelledSwitch.cancel()
+    await cancelledSwitch.value
+    check(events == ["discard new"], "cancelling replacement cannot activate it or remove the working model")
+
+    let blockedURL = suiteRoot.appendingPathComponent("blocked-model-settings")
+    try Data("not a directory".utf8).write(to: blockedURL)
+    let failedStore = SettingsStore(url: blockedURL.appendingPathComponent("settings.json"))
+    let vm = TranscriberViewModel(capture: RecordingAudioCapture(directory: suiteRecordings), settingsStore: failedStore, meetingStore: .inMemory())
+    do {
+        try vm.activateLocalSummaryModel(discovered.id, replacing: SummaryModelCatalog.defaultID)
+        check(false, "model selection must fail when it cannot be saved")
+    } catch {
+        check(vm.settings.summaryModel == SummaryModelCatalog.defaultID && failedStore.load().summaryModel == SummaryModelCatalog.defaultID,
+              "failed settings persistence leaves both in-memory and durable model selection unchanged")
+    }
+    let memorySettings = SettingsStore.inMemory()
+    let activeVM = TranscriberViewModel(capture: RecordingAudioCapture(directory: suiteRecordings), settingsStore: memorySettings, meetingStore: .inMemory())
+    try activeVM.activateLocalSummaryModel(discovered.id, replacing: SummaryModelCatalog.defaultID)
+    check(memorySettings.load().summaryModel == discovered.id, "successful model activation is durable before cleanup")
+    activeVM.updateSettings { $0.summaryBackend = .openai }
+    activeVM.updateSettings { $0.summaryBackend = .localModel }
+    check(activeVM.settings.summaryModel == discovered.id && memorySettings.load().lastLocalSummaryModel == discovered.id,
+          "switching providers remembers the downloaded model instead of restoring deleted default weights")
+    do {
+        try activeVM.activateLocalSummaryModel(SummaryModelCatalog.defaultID, replacing: "stale-model")
+        check(false, "stale activation must fail")
+    } catch { check(activeVM.settings.summaryModel == discovered.id, "a stale replacement cannot override a newer selection") }
+} catch { check(false, "model replacement: \(error)") }
+
 section("downloaded local model contracts and legacy settings")
 do {
     check(WhisperCatalog.selectable.allSatisfy { $0.sha256?.count == 64 && $0.url.path.contains("5359861") }, "Whisper production models pin a revision and SHA256")
@@ -823,7 +1003,7 @@ do {
     let savedApple = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"transcriptionBackend":"local","summaryBackend":"local"}"#.utf8))
     check(savedApple.transcriptionBackend == .local && savedApple.summaryBackend == .local && savedApple.summaryModel.isEmpty,
           "saved Apple choices remain usable after the local-model pivot")
-    let configured = AppSettings(transcriptionVocabulary: "pembrolizumab, pharmacokinetics, FDA")
+    let configured = AppSettings(transcriptionVocabulary: "Tymlos\nParatek\nLEO Pharma")
     let roundTrip = try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(configured))
     check(roundTrip == configured, "new local choices and pharmaceutical vocabulary survive serialization")
     let fake = FakeHTTP(status: 200, body: Data(#"{"choices":[{"finish_reason":"stop","message":{"content":"{\"overall\":\"Audit findings\",\"key_points\":[\"Priority P0\"],\"decisions\":[],\"action_items\":[\"Alex: repair redirects Friday\"]}"}}]}"#.utf8))
@@ -1406,6 +1586,8 @@ do {
     try FileManager.default.createDirectory(at: dated, withIntermediateDirectories: true)
     let audio = dated.appendingPathComponent("mic.wav")
     try Data("retryable audio".utf8).write(to: audio)
+    let staleSpeakerAudio = dated.appendingPathComponent(CapturedAudio.speakerAudioFileName)
+    try Data("transient voice analysis audio".utf8).write(to: staleSpeakerAudio)
     let empty = RecordingsDirectory.forMeeting(sameMinute, timeZone: utc)
     try FileManager.default.createDirectory(at: empty, withIntermediateDirectories: true)
     let orphan = RecordingsDirectory.forMeeting(next, timeZone: utc)
@@ -1418,6 +1600,8 @@ do {
     let artifacts = MeetingArtifacts()
     let swept = Set(artifacts.sweep(liveIDs: [meeting.id, sameMinute.id]).map(\.lastPathComponent))
     check(swept == Set([empty.lastPathComponent, orphan.lastPathComponent]), "sweep removes dated orphans and empty folders while preserving live audio and foreign folders")
+    check(!FileManager.default.fileExists(atPath: staleSpeakerAudio.path) && FileManager.default.fileExists(atPath: audio.path),
+          "startup removes interrupted speaker analysis from live meeting folders while preserving original audio")
     try artifacts.removeEmptyDirectory(for: meeting.id)
     check(FileManager.default.fileExists(atPath: audio.path), "empty-folder cleanup keeps retained dated audio")
     try artifacts.remove([audio])
@@ -1938,8 +2122,8 @@ do {
         let transcriber = CountingTranscriber()
         let summarizer = CheckpointSummary(url: url)
         summarizer.expectCheckpoint = keepTranscript
-        let settings = AppSettings(keepTranscriptAfterSummary: keepTranscript)
-        let pipeline = PipelineProcessor(transcriber: transcriber, diarizer: IdentityDiarizer(), summarizer: summarizer)
+        let settings = AppSettings(keepTranscriptAfterSummary: keepTranscript, keepAudioAfterSummary: true)
+        let pipeline = PipelineProcessor(transcriber: transcriber, diarizer: IdentityDiarizer(), summarizer: summarizer, speakerAttribution: .provider)
         let vm = TranscriberViewModel(capture: RecordingAudioCapture(directory: suiteRecordings), processor: pipeline,
                                      settings: settings, settingsStore: .inMemory(), meetingStore: MeetingStore(url: url))
         let m = await vm.startAsync(title: "Checkpoint")
@@ -1947,6 +2131,9 @@ do {
         let failed = MeetingStore(url: url).load().first!
         check(failed.status == .failed && failed.transcript.isEmpty != keepTranscript,
               "summary failure preserves transcript only when opted in")
+        if keepTranscript {
+            check(failed.speakerAttribution == .provider, "transcript checkpoints preserve speaker provenance through a summary failure")
+        }
         check(!failed.audioFileURLs.isEmpty && failed.audioFileURLs.values.allSatisfy { FileManager.default.fileExists(atPath: $0.path) },
               "summary failure preserves original audio")
         if keepTranscript {
@@ -1965,6 +2152,18 @@ do {
             let replaced = await force.retry(id: m.id, reuseTranscript: false)
             check(replaced && transcriber.calls == 2 && force.meeting(id: m.id)?.transcript != stale.transcript,
                   "explicit retranscription replaces an incomplete checkpoint with fresh speech")
+            let ignored = await force.retry(id: m.id)
+            check(!ignored && transcriber.calls == 2, "completed meetings do not rerun through an ordinary retry")
+            let rerun = await force.retry(id: m.id, reuseTranscript: false)
+            check(rerun && transcriber.calls == 3 && force.meeting(id: m.id)?.status == .summarized,
+                  "completed meetings with retained audio support explicit transcription and summary reruns")
+            var noAudio = force.meeting(id: m.id)!
+            noAudio.audioFileURLs = [:]
+            let noAudioVM = TranscriberViewModel(capture: RecordingAudioCapture(directory: suiteRecordings), processor: pipeline,
+                                                settings: settings, settingsStore: .inMemory(), meetingStore: .inMemory(initial: [noAudio]))
+            let rejected = await noAudioVM.retry(id: m.id, reuseTranscript: false)
+            check(!rejected && noAudioVM.meeting(id: m.id)?.status == .summarized && transcriber.calls == 3,
+                  "retranscription without retained audio leaves the completed meeting unchanged")
         }
     }
 }

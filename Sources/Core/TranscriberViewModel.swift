@@ -281,7 +281,7 @@ public final class TranscriberViewModel: ObservableObject {
 
     /// Run the pipeline for a specific meeting. Awaitable so tests drive it.
     @discardableResult
-    public func runPipeline(for id: UUID, reuseTranscript: Bool = true) async -> Bool {
+    public func runPipeline(for id: UUID, reuseTranscript: Bool = true, speakerOnly: Bool = false) async -> Bool {
         guard var meeting = engine.meeting(id: id),
               meeting.status == .processing || meeting.status == .failed else { return false }
         guard !processingIDs.contains(id) else { return false }
@@ -295,7 +295,7 @@ public final class TranscriberViewModel: ObservableObject {
         }
 
         processingError = nil
-        processingProgress = ProcessingProgress(stage: .transcribing, fraction: 0)
+        processingProgress = ProcessingProgress(stage: speakerOnly ? .diarizing : .transcribing, fraction: 0)
         progressByMeeting[id] = processingProgress
 
         do {
@@ -313,11 +313,18 @@ public final class TranscriberViewModel: ObservableObject {
             }
             let task = Task {
                 let audio = CapturedAudio(fileURLs: meeting.audioFileURLs, startOffsets: meeting.audioStartOffsets)
+                if speakerOnly {
+                    guard let relabeler = active as? any SpeakerReprocessing else {
+                        throw LLMError("This backend does not support updating speaker labels separately.")
+                    }
+                    return try await relabeler.reprocessSpeakers(meeting: meeting, audio: audio, report: report)
+                }
                 if let checkpointing = active as? any TranscriptCheckpointingProcessor {
+                    let attribution = meeting.transcript.isEmpty ? checkpointing.speakerAttribution : meeting.speakerAttribution
                     return try await checkpointing.process(
                         meeting: meeting, audio: audio, report: report,
                         checkpoint: { [weak self] segments in
-                            try await self?.retainTranscriptCheckpoint(id: id, segments: segments)
+                            try await self?.retainTranscriptCheckpoint(id: id, segments: segments, attribution: attribution)
                         }
                     )
                 }
@@ -332,16 +339,18 @@ public final class TranscriberViewModel: ObservableObject {
 
             // Record the transcript (so it's inspectable before summarizing),
             // then mark summarized (clearing it unless retention keeps it).
-            engine.setTranscript(id: id, segments: result.segments)
             let policy = RetentionPolicy(settings: settings)
-            engine.markSummarized(
-                id: id,
-                summary: result.summary,
-                speakerCount: result.speakerCount,
-                keepTranscript: policy.keepTranscript
-            )
+            if speakerOnly {
+                engine.completeSpeakerUpdate(id: id, segments: result.segments, count: result.speakerCount, attribution: result.speakerAttribution)
+            } else {
+                engine.setTranscript(id: id, segments: result.segments)
+                engine.markSummarized(
+                    id: id, summary: result.summary, speakerCount: result.speakerCount,
+                    keepTranscript: policy.keepTranscript, speakerAttribution: result.speakerAttribution
+                )
+            }
 
-            let toDelete = policy.artifactsToDelete(for: meeting)
+            let toDelete = speakerOnly ? [] : policy.artifactsToDelete(for: meeting)
             engine.scheduleArtifactDeletion(id: id, urls: toDelete)
             // The summary must be durable before any source audio is destroyed.
             guard persist() else {
@@ -370,28 +379,32 @@ public final class TranscriberViewModel: ObservableObject {
             // summary is ready. Pure decision in MeetingNotificationPolicy; the
             // poster owns the platform call. No-op when the user disabled
             // notifications or no notifier is wired.
-            self.notifyTerminal(id: id, errorDescription: nil)
+            if !speakerOnly { self.notifyTerminal(id: id, errorDescription: nil) }
             return true
         } catch {
             processingProgress = nil
             processingError = error is CancellationError
                 ? "Processing was cancelled. Audio was kept; retry when you’re ready."
                 : (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-            engine.fail(id: id, reason: processingError)
+            if speakerOnly, meeting.summary != nil {
+                engine.completeSpeakerUpdate(id: id, segments: meeting.transcript, count: meeting.speakerCount, attribution: meeting.speakerAttribution)
+            } else {
+                engine.fail(id: id, reason: processingError)
+            }
             self.meetings = engine.recent
             self.activeMeeting = engine.active
             self.persist()
             // The meeting failed — surface it so the user knows to retry, with
             // the reason when we have one.
-            self.notifyTerminal(id: id, errorDescription: processingError)
+            if !speakerOnly { self.notifyTerminal(id: id, errorDescription: processingError) }
             return false
         }
     }
 
-    private func retainTranscriptCheckpoint(id: UUID, segments: [TranscriptSegment]) throws {
+    private func retainTranscriptCheckpoint(id: UUID, segments: [TranscriptSegment], attribution: SpeakerAttribution) throws {
         guard settings.keepTranscriptAfterSummary else { return }
         guard processingIDs.contains(id), engine.meeting(id: id) != nil else { throw CancellationError() }
-        engine.setTranscript(id: id, segments: segments)
+        engine.setTranscript(id: id, segments: segments, attribution: attribution)
         meetings = engine.recent
         guard persist() else {
             throw LLMError("The transcript could not be saved. Audio was kept; check your data folder and retry.")
@@ -443,7 +456,7 @@ public final class TranscriberViewModel: ObservableObject {
             try artifacts.removeEmptyDirectory(for: meeting.id)
             engine.completeArtifactDeletion(id: meeting.id)
             engine.markSummarized(id: meeting.id, summary: summary, speakerCount: meeting.speakerCount,
-                                  keepTranscript: !meeting.transcript.isEmpty)
+                                  keepTranscript: !meeting.transcript.isEmpty, speakerAttribution: meeting.speakerAttribution)
             persist()
             processingError = nil
             meetings = engine.recent
@@ -462,12 +475,15 @@ public final class TranscriberViewModel: ObservableObject {
         processingTasks[id]?.cancel()
     }
 
-    /// Retry a failed meeting's pipeline.
+    /// Retry a failed pipeline, or explicitly retranscribe a completed meeting
+    /// with retained audio. Keep the previous result until new stages succeed.
     @discardableResult
     public func retry(id: UUID, reuseTranscript: Bool = true) async -> Bool {
-        guard let m = engine.meeting(id: id), m.status == .failed else { return false }
+        guard let m = engine.meeting(id: id), !processingIDs.contains(id),
+              m.status == .failed || (!reuseTranscript && m.status == .summarized &&
+                  !m.audioFileURLs.isEmpty && m.pendingArtifactDeletion.isEmpty) else { return false }
         if m.summary != nil && !m.pendingArtifactDeletion.isEmpty { return finishPendingRetention(m) }
-        engine.retry(id: id)
+        engine.retry(id: id, allowCompleted: !reuseTranscript)
         self.meetings = engine.recent
         self.activeMeeting = engine.active
         self.persist()
@@ -476,19 +492,56 @@ public final class TranscriberViewModel: ObservableObject {
 
     // MARK: - Settings
 
+    public var canReplaceLocalModel: Bool {
+        !isRecording && !isStarting && !isStopping && processingIDs.isEmpty
+    }
+
+    /// The old weights may be removed only after this durable commit succeeds.
+    public func activateLocalSummaryModel(_ id: String, replacing previousID: String) throws {
+        guard canReplaceLocalModel, settings.summaryBackend == .localModel, settings.summaryModel == previousID else {
+            throw LLMError("Model settings or meeting activity changed. The current model was kept; try switching when the app is idle.")
+        }
+        var next = settings
+        next.summaryModel = id
+        next.lastLocalSummaryModel = id
+        guard settingsStore?.save(next) ?? true else {
+            throw LLMError("The new model selection could not be saved. The current model was kept.")
+        }
+        settings = next
+    }
+
+    /// Reuse retained text and audio to update only acoustic speaker labels.
+    /// Speaker count and labels are always inferred from the audio.
+    @discardableResult
+    public func reprocessSpeakers(id: UUID) async -> Bool {
+        guard let m = engine.meeting(id: id), m.status == .summarized,
+              !m.transcript.isEmpty, !m.audioFileURLs.isEmpty,
+              m.pendingArtifactDeletion.isEmpty, !processingIDs.contains(id), m.summary != nil else { return false }
+        engine.retry(id: id, allowCompleted: true)
+        meetings = engine.recent
+        guard persist() else {
+            engine.completeSpeakerUpdate(id: id, segments: m.transcript, count: m.speakerCount, attribution: m.speakerAttribution)
+            meetings = engine.recent
+            return false
+        }
+        return await runPipeline(for: id, speakerOnly: true)
+    }
+
     /// Update a setting and persist it.
     public func updateSettings(_ mutate: (inout AppSettings) -> Void) {
         let previousTranscription = settings.transcriptionBackend
         let previousBackend = settings.summaryBackend
         let previousModel = settings.summaryModel
+        if previousBackend == .localModel { settings.lastLocalSummaryModel = previousModel }
         mutate(&settings)
         if previousTranscription != settings.transcriptionBackend && settings.transcriptionBackend == .whisper,
            !WhisperCatalog.selectable.contains(where: { $0.id == settings.whisperModel }) {
             settings.whisperModel = WhisperCatalog.defaultID
         }
         if previousBackend != settings.summaryBackend && previousModel == settings.summaryModel {
-            settings.summaryModel = AppSettings.defaultSummaryModel(for: settings.summaryBackend)
+            settings.summaryModel = settings.summaryBackend == .localModel ? settings.lastLocalSummaryModel : AppSettings.defaultSummaryModel(for: settings.summaryBackend)
         }
+        if settings.summaryBackend == .localModel { settings.lastLocalSummaryModel = settings.summaryModel }
         if !settings.showToasts { toastTask?.cancel(); toastMessage = nil }
         settingsStore?.save(settings)
     }

@@ -138,6 +138,7 @@ public final class MeetingEngine {
         summary: MeetingSummary,
         speakerCount: Int,
         keepTranscript: Bool = false,
+        speakerAttribution: SpeakerAttribution = .unverified,
         now: Date? = nil
     ) {
         let t = now ?? clock.now()
@@ -146,6 +147,7 @@ public final class MeetingEngine {
         if summary.generatedAt == Date(timeIntervalSince1970: 0) { summary.generatedAt = t }
         meetings[idx].summary = summary
         meetings[idx].speakerCount = speakerCount
+        meetings[idx].speakerAttribution = speakerAttribution
         if !keepTranscript {
             meetings[idx].transcript = []
         }
@@ -156,11 +158,24 @@ public final class MeetingEngine {
 
     /// Attach a transcript to a meeting (set by the view model after the
     /// transcribe stage, so the record is inspectable even before summarizing).
-    public func setTranscript(id: UUID, segments: [TranscriptSegment], now: Date? = nil) {
+    public func setTranscript(id: UUID, segments: [TranscriptSegment], attribution: SpeakerAttribution? = nil, now: Date? = nil) {
         let t = now ?? clock.now()
         guard let idx = index(of: id) else { return }
         meetings[idx].transcript = segments
+        if let attribution { meetings[idx].speakerAttribution = attribution }
         meetings[idx].lastActivityAt = t
+    }
+
+    /// Update labels without touching the existing summary, including its date.
+    public func completeSpeakerUpdate(id: UUID, segments: [TranscriptSegment], count: Int,
+                                      attribution: SpeakerAttribution, now: Date? = nil) {
+        guard let idx = index(of: id), meetings[idx].summary != nil else { return }
+        meetings[idx].transcript = segments
+        meetings[idx].speakerCount = count
+        meetings[idx].speakerAttribution = attribution
+        meetings[idx].status = .summarized
+        meetings[idx].failureReason = nil
+        meetings[idx].lastActivityAt = now ?? clock.now()
     }
 
     /// Persist the cleanup decision alongside the summary before deleting any
@@ -187,11 +202,14 @@ public final class MeetingEngine {
         meetings[idx].lastActivityAt = t
     }
 
-    /// Re-enter processing (retry after a failure).
-    public func retry(id: UUID, now: Date? = nil) {
+    /// Re-enter processing after failure, or explicitly retranscribe a completed
+    /// meeting whose source audio was retained.
+    public func retry(id: UUID, allowCompleted: Bool = false, now: Date? = nil) {
         let t = now ?? clock.now()
         guard let idx = index(of: id) else { return }
-        guard meetings[idx].status == .failed else { return }
+        guard meetings[idx].status == .failed ||
+                (allowCompleted && meetings[idx].status == .summarized &&
+                 !meetings[idx].audioFileURLs.isEmpty && meetings[idx].pendingArtifactDeletion.isEmpty) else { return }
         meetings[idx].status = .processing
         meetings[idx].lastActivityAt = t
     }

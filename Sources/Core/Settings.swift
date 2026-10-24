@@ -1,5 +1,31 @@
 import Foundation
 
+/// Saved spelling hints, not replacement rules. Keep complete terms and their
+/// order so a long list never turns a brand name into a partial word.
+public struct TranscriptionVocabulary: Sendable {
+    public static let promptCharacterLimit = 1_000
+    public let terms: [String]
+    public let includedTerms: [String]
+    public var prompt: String { includedTerms.joined(separator: ", ") }
+    public var omittedCount: Int { terms.count - includedTerms.count }
+
+    public init(_ text: String) {
+        var seen = Set<String>()
+        terms = text.components(separatedBy: CharacterSet.newlines.union(CharacterSet(charactersIn: ",;")))
+            .map { $0.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ") }
+            .filter { !$0.isEmpty && seen.insert($0.lowercased()).inserted }
+        var included: [String] = []
+        var length = 0
+        for term in terms {
+            let added = term.count + (included.isEmpty ? 0 : 2)
+            guard length + added <= Self.promptCharacterLimit else { break }
+            included.append(term)
+            length += added
+        }
+        includedTerms = included
+    }
+}
+
 // MARK: - Settings (Core, lenient Codable)
 //
 // User preferences. Mirrors the base repo's `AppSettings`: lenient decoding
@@ -15,7 +41,7 @@ import Foundation
 public enum TranscriptionBackend: String, Codable, CaseIterable, Sendable {
     case whisper
     /// Apple Speech, on-device, private. No API key, no model download.
-    /// Speaker ID is best-effort (heuristic diarization).
+    /// Downloaded acoustic models supply best-effort speaker clustering.
     case local
     /// Deepgram (Nova) — native diarization (accurate speaker labels).
     /// Needs an API key (stored in the Keychain, never in settings.json).
@@ -54,6 +80,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
     // Summary
     public var summaryBackend: SummaryBackend
     public var summaryModel: String
+    public var lastLocalSummaryModel: String
     public var promptOverride: String?
 
     // General
@@ -91,6 +118,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.transcriptionVocabulary = transcriptionVocabulary
         self.summaryBackend = summaryBackend
         self.summaryModel = summaryModel ?? Self.defaultSummaryModel(for: summaryBackend)
+        self.lastLocalSummaryModel = summaryBackend == .localModel ? self.summaryModel : SummaryModelCatalog.defaultID
         self.promptOverride = promptOverride
         self.showToasts = showToasts
         self.notifyOnSummary = notifyOnSummary
@@ -119,7 +147,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         case captureMic, captureSystem, inputDeviceID, inputDeviceName
         case storageDirectory, keepTranscriptAfterSummary, keepAudioAfterSummary
         case transcriptionBackend, whisperModel, language, transcriptionVocabulary
-        case summaryBackend, summaryModel, promptOverride
+        case summaryBackend, summaryModel, lastLocalSummaryModel, promptOverride
         case showToasts, notifyOnSummary
     }
 
@@ -141,6 +169,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
         transcriptionVocabulary = try d.decodeIfPresent(String.self, forKey: .transcriptionVocabulary) ?? ""
         summaryBackend = try d.decodeIfPresent(SummaryBackend.self, forKey: .summaryBackend) ?? .local
         summaryModel = try d.decodeIfPresent(String.self, forKey: .summaryModel) ?? Self.defaultSummaryModel(for: summaryBackend)
+        lastLocalSummaryModel = try d.decodeIfPresent(String.self, forKey: .lastLocalSummaryModel)
+            ?? (summaryBackend == .localModel ? summaryModel : SummaryModelCatalog.defaultID)
         promptOverride = try d.decodeIfPresent(String.self, forKey: .promptOverride)
         showToasts = try d.decodeIfPresent(Bool.self, forKey: .showToasts) ?? def.showToasts
         notifyOnSummary = try d.decodeIfPresent(Bool.self, forKey: .notifyOnSummary) ?? def.notifyOnSummary
@@ -184,12 +214,16 @@ public final class SettingsStore: @unchecked Sendable {
         }
     }
 
-    public func save(_ s: AppSettings) {
-        cache = s
-        guard !memoryOnly else { return }
-        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        let data = (try? JSONEncoder().encode(s)) ?? Data()
-        try? data.write(to: url, options: .atomic)
+    @discardableResult
+    public func save(_ s: AppSettings) -> Bool {
+        if memoryOnly { cache = s; return true }
+        do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let data = try JSONEncoder().encode(s)
+            try data.write(to: url, options: .atomic)
+            cache = s
+            return true
+        } catch { return false }
     }
 }
 
@@ -282,6 +316,7 @@ public struct RetentionPolicy: Sendable {
         if let directory = meeting.audioFileURLs.values.first?.deletingLastPathComponent() {
             urls.append(directory.appendingPathComponent(CapturedAudio.preparedFileName))
             urls.append(directory.appendingPathComponent(CapturedAudio.speechSectionFileName))
+            urls.append(directory.appendingPathComponent(CapturedAudio.speakerAudioFileName))
         }
         if !settings.keepAudioAfterSummary {
             urls.append(contentsOf: meeting.audioFileURLs.values)
