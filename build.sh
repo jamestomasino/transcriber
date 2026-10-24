@@ -130,6 +130,7 @@ cat > "${APP_DIR}/Contents/Info.plist" <<PLIST
     <key>CFBundleExecutable</key>      <string>${APP_NAME}</string>
     <key>CFBundleIdentifier</key>      <string>${BUNDLE_ID}</string>
     <key>CFBundlePackageType</key>     <string>APPL</string>
+    <key>CFBundleIconFile</key>        <string>AppIcon</string>
     <key>CFBundleShortVersionString</key> <string>0.1.0</string>
     <key>CFBundleVersion</key>         <string>1</string>
     <key>LSMinimumSystemVersion</key>  <string>${MIN_MACOS}</string>
@@ -144,6 +145,7 @@ cat > "${APP_DIR}/Contents/Info.plist" <<PLIST
 PLIST
 
 cp Sources/CWhisper/LICENSE "$RES_DIR/Whisper-LICENSE"
+cp Resources/AppIcon.icns "$RES_DIR/AppIcon.icns"
 
 echo "==> Writing PkgInfo"
 printf 'APPL????' > "${APP_DIR}/Contents/PkgInfo"

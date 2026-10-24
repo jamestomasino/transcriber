@@ -1,6 +1,7 @@
 # Build output
 build/
 *.app
+*.iconset
 
 # SwiftPM
 .build/
