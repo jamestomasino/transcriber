@@ -77,8 +77,8 @@ as proof that recording permissions and the meeting pipeline work.
 imports the signing certificate, signs, notarizes, staples, and packages a
 release on a version tag or manual invocation. Manual runs must target `main`
 or a `v*` tag. The selected commit must belong to `main`; it is then checked out
-by its exact SHA for signing. Signing waits for approval in the protected
-`release` environment. It requires these **environment secrets**:
+by its exact SHA for signing. Signing uses the ref-restricted `release` environment without a manual
+approval gate. It requires these **environment secrets**:
 
 - `TRANSCRIBER_SIGN_IDENTITY`
 - `TRANSCRIBER_P12_BASE64`, `TRANSCRIBER_P12_PASSWORD`
@@ -88,13 +88,13 @@ GitHub cannot return stored secret values. When migrating existing repository
 secrets, re-enter all six values under Settings → Environments → release →
 Environment secrets, verify all six names are present, then remove the matching
 repository secrets. Keeping repository copies allows other workflows to bypass
-the environment's approval gate. Do not paste credentials into issues or chat.
+the environment's ref restrictions. Do not paste credentials into issues or chat.
 The environment settings are at
 https://github.com/jamestomasino/transcriber/settings/environments.
 
-The `release` environment permits only branch `main` and tags `v*`, requires
-`jamestomasino` to approve, and disables administrator bypass. Self-approval is
-allowed for the single-maintainer release process. Repository rules limit release
+The `release` environment permits only branch `main` and tags `v*`. It has no
+required reviewers: pushing a trusted release tag authorizes publication without
+interactive approval. Repository rules limit release
 tag creation to administrators, prohibit updating or deleting release tags, and
 prevent force pushes or deletion of `main`. Only tag reviewed commits already on
 `main`; the ancestry check does not replace code review.
