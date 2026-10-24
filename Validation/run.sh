@@ -6,7 +6,7 @@ case "$MODE" in
   background) APP_SRC=(Sources/App/BackgroundResourceMonitor.swift Sources/App/LocalModelAssets.swift Sources/App/SummaryModelManager.swift Sources/App/HTTPClient.swift Sources/App/WhisperTranscriber.swift Sources/App/LocalSummaryServer.swift Sources/App/SummarySectionStore.swift Sources/App/AudioPreparation.swift Sources/App/LocalTranscriber.swift); ENTRY=Validation/BackgroundChecks.swift ;;
   live) APP_SRC=(Sources/App/AudioDevices.swift Sources/App/RealAudioCapture.swift Sources/App/SystemAudioTap.swift Sources/App/LocalTranscriber.swift Sources/App/LocalSummarizer.swift); ENTRY=Validation/LiveChecks.swift ;;
   models) APP_SRC=(Sources/App/LocalModelAssets.swift Sources/App/SummaryModelManager.swift Sources/App/HTTPClient.swift Sources/App/WhisperTranscriber.swift Sources/App/LocalSummaryServer.swift Sources/App/SummarySectionStore.swift Sources/App/AudioPreparation.swift Sources/App/LocalTranscriber.swift); ENTRY=Validation/LocalInferenceChecks.swift ;;
-  preview) APP_SRC=(Sources/App/LocalModelAssets.swift Sources/App/SummaryModelManager.swift Sources/App/LocalSummaryServer.swift Sources/App/SummarySectionStore.swift Sources/App/LocalModelSetupView.swift Sources/App/LocalSpeakerDiarizer.swift Sources/App/WhisperTranscriber.swift Sources/App/AudioPreparation.swift Sources/App/LocalTranscriber.swift Sources/App/ContentView.swift Sources/App/MeetingDetailView.swift Sources/App/SettingsView.swift Sources/App/OnboardingView.swift Sources/App/SystemAudioTap.swift Sources/App/AudioDevices.swift Sources/App/HTTPClient.swift); ENTRY=Validation/Preview.swift ;;
+  preview) APP_SRC=(Sources/App/LocalModelAssets.swift Sources/App/SummaryModelManager.swift Sources/App/LocalSummaryServer.swift Sources/App/SummarySectionStore.swift Sources/App/LocalModelSetupView.swift Sources/App/LocalSpeakerDiarizer.swift Sources/App/WhisperTranscriber.swift Sources/App/AudioPreparation.swift Sources/App/LocalTranscriber.swift Sources/App/ContentView.swift Sources/App/MeetingDetailView.swift Sources/App/SettingsView.swift Sources/App/Notifications.swift Sources/App/OnboardingView.swift Sources/App/SystemAudioTap.swift Sources/App/AudioDevices.swift Sources/App/HTTPClient.swift); ENTRY=Validation/Preview.swift ;;
   *) echo 'Usage: bash Validation/run.sh live [--system-audio] | preview [--empty]' >&2; exit 1 ;;
 esac
 if [ ! -f build/sdk-path ]; then bash build.sh test; fi
@@ -34,7 +34,7 @@ else
   cp build/Transcriber.app/Contents/Info.plist "$BUNDLE/Contents/Info.plist"
   /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier local.transcriber.validation' "$BUNDLE/Contents/Info.plist"
   /usr/libexec/PlistBuddy -c 'Set :CFBundleExecutable TranscriberValidation' "$BUNDLE/Contents/Info.plist"
-  /usr/libexec/PlistBuddy -c 'Set :CFBundleName Transcriber Validation' "$BUNDLE/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c 'Set :CFBundleName Transcriber UI Preview' "$BUNDLE/Contents/Info.plist"
   codesign --force --sign - "$BUNDLE"
   open -n "$BUNDLE" --args "${@:2}"
 fi

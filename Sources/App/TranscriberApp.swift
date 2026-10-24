@@ -77,7 +77,7 @@ struct TranscriberApp: App {
         // Ask for the banner permission once, on launch, so the first finished
         // meeting can actually post. Idempotent — macOS won't re-prompt after
         // the user has decided.
-        MeetingNotifications.requestAuthorization()
+        if settings.notifyOnSummary { MeetingNotifications.requestAuthorization() }
     }
 
     /// Run inside the app's existing Speech authorization, using only synthetic
@@ -135,11 +135,11 @@ struct TranscriberApp: App {
                     .foregroundStyle(.red)
                     .disabled(true)
                 Divider()
-                Button("Stop") { vm.stop() }
+                Button("Stop recording") { vm.stop() }
                     .disabled(vm.isStarting || vm.isStopping)
                     .keyboardShortcut(".", modifiers: .command)
             } else {
-                Button("Start meeting") { vm.start(title: nil) }
+                Button("Start recording") { vm.start(title: nil) }
                     .disabled(vm.settings.requestedSources.isEmpty || vm.isStarting || vm.isStopping)
                     .keyboardShortcut("m", modifiers: [.command, .shift])
             }
@@ -152,7 +152,7 @@ struct TranscriberApp: App {
             Button("Quit") { NSApplication.shared.terminate(nil) }
                 .keyboardShortcut("q")
         } label: {
-            Image(systemName: vm.isRecording ? "record.circle" : "waveform.circle")
+            Image(systemName: vm.isRecording ? "record.circle" : "waveform.circle").accessibilityLabel("Transcriber")
         }
         .menuBarExtraStyle(.menu)
     }

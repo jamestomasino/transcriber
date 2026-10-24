@@ -17,6 +17,7 @@ struct OnboardingView: View {
     }
 
     @ObservedObject var vm: TranscriberViewModel
+    @Environment(\.externalActionsEnabled) private var enabled
     @Environment(\.scenePhase) private var scenePhase
     @State private var micStatus = PermissionStatus.notRequested
     @State private var systemStatus = PermissionStatus.notRequested
@@ -29,9 +30,12 @@ struct OnboardingView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Before your first meeting").font(.headline)
-            Text("Choose your audio sources and backends in Settings, then use the Allow buttons below to grant access before recording. You can record with just one source enabled.")
+            Text("Set up recording").font(.headline)
+            Text("Allow access to the audio you want to record. Choose your microphone, transcription, and summary options in Settings.")
                 .foregroundStyle(.secondary)
+            if vm.settings.requestedSources.isEmpty {
+                Text("Choose at least one audio source in Settings before recording.").foregroundStyle(.orange)
+            }
             if vm.settings.captureMic {
                 permission("Microphone", detail: "Records your voice.", status: micStatus, pane: "Microphone", request: requestMicrophone)
             }
@@ -42,7 +46,7 @@ struct OnboardingView: View {
                 }
                 if systemStatus != .notRequested {
                     Button(checkingScreenAccess ? "Checking audio…" : "Check audio again", action: requestSystemAccess)
-                        .disabled(checkingScreenAccess || vm.isRecording || vm.isStarting)
+                        .disabled(!enabled || checkingScreenAccess || vm.isRecording || vm.isStarting)
                 }
                 if systemStatus == .denied {
                     Text("Enable Transcriber’s system audio access under Privacy & Security → Screen & System Audio Recording (Screen Recording on older macOS). If macOS asks, quit and reopen Transcriber to apply access.")
@@ -50,30 +54,30 @@ struct OnboardingView: View {
                 }
             }
             if vm.settings.transcriptionBackend == .local {
-                permission("Speech Recognition", detail: "Turns audio into text on this Mac. Local speaker labels are approximate.", status: speechStatus, pane: "SpeechRecognition", request: requestSpeech)
+                permission("Speech Recognition", detail: "Creates transcripts on this Mac. Speaker labels are estimates.", status: speechStatus, pane: "SpeechRecognition", request: requestSpeech)
             } else if vm.settings.transcriptionBackend == .deepgram {
                 Text("Deepgram receives the recorded audio for transcription and speaker identification.")
                     .font(.callout).foregroundStyle(.secondary)
             } else {
-                Text("Whisper transcribes on this Mac using downloaded weights. Local speaker labels are approximate.")
+                Text("Whisper creates transcripts on this Mac after a one-time model download. Speaker labels are estimates.")
                     .font(.callout).foregroundStyle(.secondary)
             }
             if vm.settings.summaryBackend == .local {
                 Text("Local summaries require macOS 26 or later with Apple Intelligence enabled.")
                     .font(.callout).foregroundStyle(.secondary)
             } else if vm.settings.summaryBackend == .localModel {
-                Text("Downloaded local summaries run on this Mac. Only public model downloads use the network; your transcript stays local.")
+                Text("Your selected summary model runs on this Mac. Download it once to create summaries offline.")
                     .font(.caption).foregroundStyle(.secondary)
             } else {
                 Text("The transcript is sent to \(vm.settings.summaryBackend == .openai ? "OpenAI" : "Anthropic") for summarization. Add its API key in Settings before recording.")
                     .font(.callout).foregroundStyle(.secondary)
             }
-            if vm.settings.transcriptionBackend == .whisper || vm.settings.summaryBackend == .localModel {
+            if vm.settings.transcriptionBackend != .deepgram || vm.settings.summaryBackend == .localModel {
                 LocalModelSetupView(vm: vm)
             }
             Text(vm.settings.keepAudioAfterSummary || vm.settings.keepTranscriptAfterSummary
-                 ? "You have opted to retain audio or transcripts. Review retention in Settings → Storage."
-                 : "After a successful summary, audio and transcript are deleted. Failed meetings keep audio so you can retry.")
+                 ? "You have chosen to keep recordings or transcripts. You can change what is saved in Settings → Storage."
+                 : "Summaries are saved. Recordings and transcripts are deleted after a successful summary; unfinished meetings keep their recordings so you can try again.")
                 .font(.callout)
             SettingsLink { Label("Open Settings", systemImage: "gearshape") }
         }
@@ -91,18 +95,20 @@ struct OnboardingView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(name).font(.subheadline.bold())
                 Text(detail).font(.caption).foregroundStyle(.secondary)
+                Text(status == .allowed ? "Ready" : status == .unverified ? "Audio not detected yet" : status == .denied ? "Permission needed" : "Not yet allowed")
+                    .font(.caption).foregroundStyle(status == .allowed ? Color.green : Color.secondary)
             }
             Spacer()
             if status == .notRequested {
                 Button(pendingPermission == name ? "Requesting…" : "Allow…", action: request)
                     .accessibilityLabel("Allow \(name)")
-                    .disabled(pendingPermission != nil)
-            } else if status == .denied || status == .unverified {
-                Button("System Settings") {
+                    .disabled(!enabled || pendingPermission != nil)
+            } else if status == .denied {
+                Button("Open System Settings") {
                     if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_\(pane)") {
                         NSWorkspace.shared.open(url)
                     }
-                }
+                }.disabled(!enabled)
             }
         }
     }
@@ -203,6 +209,7 @@ struct OnboardingView: View {
     }
 
     private func refresh() {
+        guard enabled else { return }
         switch AVAudioApplication.shared.recordPermission {
         case .granted: micStatus = .allowed
         case .undetermined: micStatus = .notRequested

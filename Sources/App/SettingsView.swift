@@ -16,7 +16,18 @@ import TranscriberCore
 //
 // This lives in the App layer (not Core) because it touches the Keychain and
 // SwiftUI; the underlying `AppSettings` + persistence stay pure in Core.
+// Validation previews can exercise the views without reading credentials or
+// changing operating-system permissions. Normal app interactions stay enabled.
+private struct ExternalActionsEnabledKey: EnvironmentKey { static let defaultValue = true }
+extension EnvironmentValues {
+    var externalActionsEnabled: Bool {
+        get { self[ExternalActionsEnabledKey.self] }
+        set { self[ExternalActionsEnabledKey.self] = newValue }
+    }
+}
+
 struct SettingsView: View {
+    @Environment(\.externalActionsEnabled) private var externalActionsEnabled
     @ObservedObject var vm: TranscriberViewModel
     @State private var inputDevices: [AudioInputDevice] = []
 
@@ -34,8 +45,8 @@ struct SettingsView: View {
     var body: some View {
         Form {
             Section("Audio") {
-                Toggle("Capture microphone", isOn: binding(\.captureMic))
-                Toggle("Capture system audio", isOn: binding(\.captureSystem))
+                Toggle("Record microphone", isOn: binding(\.captureMic))
+                Toggle("Record audio from other apps", isOn: binding(\.captureSystem))
                 Picker("Microphone", selection: Binding(
                     get: { vm.settings.inputDeviceID ?? "" },
                     set: { uid in vm.updateSettings {
@@ -51,42 +62,63 @@ struct SettingsView: View {
                 }
                 .disabled(!vm.settings.captureMic || vm.isRecording)
                 Button("Refresh microphones") { inputDevices = AudioDevices.inputs() }
+                    .disabled(!externalActionsEnabled)
                 if vm.settings.requestedSources.isEmpty {
                     Text("Enable at least one audio source to start a meeting.").foregroundStyle(.orange)
                 }
             }
 
+            .disabled(vm.isRecording || vm.isStarting || vm.isStopping)
+
             Section {
-                Toggle("Keep transcript after summary", isOn: binding(\.keepTranscriptAfterSummary))
-                Toggle("Keep audio after summary", isOn: binding(\.keepAudioAfterSummary))
-                Text("By default the app deletes the audio and transcript right after the summary is written, keeping only the summary. Flip these to retain them.")
+                Toggle("Keep transcripts", isOn: binding(\.keepTranscriptAfterSummary))
+                Toggle("Keep recordings", isOn: binding(\.keepAudioAfterSummary))
+                Text("Summaries are always saved. Recordings and transcripts are deleted after a successful summary unless you choose to keep them.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                if vm.meetings.contains(where: { $0.processingRequest != nil }) {
+                    Text("Meetings already waiting or being prepared keep their earlier choices. Cancel their current attempt and try again to apply changes.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 StorageDirectoryRow(vm: vm)
             } header: {
                 Text("Storage")
             }
 
             Section("Transcription") {
-                Picker("Backend", selection: binding(\.transcriptionBackend)) {
-                    Text("Whisper — downloaded model, offline").tag(TranscriptionBackend.whisper)
-                    Text("Apple Speech — offline").tag(TranscriptionBackend.local)
-                    Text("Deepgram — accurate speaker ID").tag(TranscriptionBackend.deepgram)
+                Picker("Transcribe with", selection: binding(\.transcriptionBackend)) {
+                    Text("Whisper · on this Mac").tag(TranscriptionBackend.whisper)
+                    Text("Apple Speech · on this Mac").tag(TranscriptionBackend.local)
+                    Text("Deepgram · cloud").tag(TranscriptionBackend.deepgram)
                 }
-                TextField("Language code (e.g. en)", text: binding(\.language))
+                Picker("Language", selection: binding(\.language)) {
+                    ForEach(["en", "es", "fr", "de", "it", "pt", "ja", "ko", "zh", "ar", "hi"], id: \.self) { code in
+                        Text(Locale.current.localizedString(forLanguageCode: code) ?? code).tag(code)
+                    }
+                    if !["en", "es", "fr", "de", "it", "pt", "ja", "ko", "zh", "ar", "hi"].contains(vm.settings.language) {
+                        Text(Locale.current.localizedString(forIdentifier: vm.settings.language) ?? vm.settings.language).tag(vm.settings.language)
+                    }
+                }
+                DisclosureGroup("Other languages") {
+                    TextField("Language code", text: binding(\.language))
+                    Text("For another language or region, enter its language code, such as en-US.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 if vm.settings.transcriptionBackend == .whisper {
                     Picker("Whisper model", selection: binding(\.whisperModel)) {
                         ForEach(WhisperCatalog.selectable, id: \.id) { Text($0.displayName).tag($0.id) }
                     }
-                    Text("Large v3 prioritizes accuracy; Turbo is faster. Speaker labels remain approximate.")
+                    Text("Large v3 prioritizes detail; Turbo finishes faster. Speaker labels are estimates.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 if vm.settings.transcriptionBackend == .local {
-                    Text("Runs on this Mac with Apple Speech — private, offline, no model to download.")
+                    Text("Uses Apple Speech on this Mac. Language support depends on the speech models installed in macOS.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
                 if vm.settings.transcriptionBackend == .deepgram {
+                    Text("Audio is sent to Deepgram to create the transcript and speaker labels.")
+                        .font(.caption).foregroundStyle(.secondary)
                     APIKeyRow(title: "Deepgram API key", keyID: "deepgram_api_key")
                 }
             }
@@ -108,41 +140,43 @@ struct SettingsView: View {
                     }
                     .background(.background)
                     .overlay(RoundedRectangle(cornerRadius: 5).stroke(.quaternary))
-                    Text("Enter one name per line, using its correct spelling. Commas and semicolons also work. Saved automatically on this Mac and reused for Whisper transcription.")
+                    Text("Add names and terms you use often, one per line. Your changes are saved automatically and help Whisper recognize their spelling.")
                         .font(.caption).foregroundStyle(.secondary)
                     let vocabulary = TranscriptionVocabulary(vm.settings.transcriptionVocabulary)
-                    Text("\(vocabulary.terms.count) saved · \(vocabulary.includedTerms.count) in the transcription hint")
+                    Text("\(vocabulary.terms.count) saved · \(vocabulary.includedTerms.count) used for transcription")
                         .font(.caption).foregroundStyle(.secondary)
                     if vocabulary.omittedCount > 0 {
-                        Text("\(vocabulary.omittedCount) terms exceed the \(TranscriptionVocabulary.promptCharacterLimit)-character hint budget. Put the most relevant names first or shorten the list.")
+                        Text("\(vocabulary.omittedCount) terms do not fit. Put the most important names first or shorten the list.")
                             .font(.caption).foregroundStyle(.orange)
                     }
                     if vm.settings.transcriptionBackend != .whisper {
-                        Text("Select Whisper to use this vocabulary. It stays saved when using other backends.")
+                        Text("These terms are used with Whisper. They stay saved when you choose another transcription service.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
-                    Text("Names are spelling hints, not guaranteed corrections. Changes apply to future transcriptions and ‘Transcribe again’ when audio is retained. Existing transcripts and summary-only retries stay as written.")
+                    Text("Applies to new transcripts. To use updated spellings for an earlier meeting, choose Transcribe again when its recording is saved.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
 
             Section("Summary") {
-                Picker("Backend", selection: binding(\.summaryBackend)) {
-                    Text("Downloaded local model — offline").tag(SummaryBackend.localModel)
-                    Text("Apple Intelligence — offline").tag(SummaryBackend.local)
-                    Text("OpenAI").tag(SummaryBackend.openai)
-                    Text("Anthropic").tag(SummaryBackend.anthropic)
+                Picker("Summarize with", selection: binding(\.summaryBackend)) {
+                    Text("Downloaded model · on this Mac").tag(SummaryBackend.localModel)
+                    Text("Apple Intelligence · on this Mac").tag(SummaryBackend.local)
+                    Text("OpenAI · cloud").tag(SummaryBackend.openai)
+                    Text("Anthropic · cloud").tag(SummaryBackend.anthropic)
                 }
                 if vm.settings.summaryBackend == .local {
-                    Text("Runs on this Mac with Apple Intelligence — no account, no key, no network. Requires macOS 26+ with Apple Intelligence enabled.")
+                    Text("Uses Apple Intelligence on this Mac. Requires macOS 26 or later with Apple Intelligence enabled.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else if vm.settings.summaryBackend == .localModel {
                     SummaryModelSelectionView(vm: vm)
-                    Text("8 GB or more recommended. The context is bounded to keep memory use predictable; long meetings are processed in complete sections.")
+                    Text("Requires at least 8 GB of memory. Allow extra time for longer meetings and when other apps are busy.")
                         .font(.caption).foregroundStyle(.secondary)
                 } else {
-                    TextField("Model identifier", text: binding(\.summaryModel))
+                    Text("Transcripts are sent to \(vm.settings.summaryBackend == .openai ? "OpenAI" : "Anthropic") to create summaries.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    TextField("Model name", text: binding(\.summaryModel))
                 }
                 if vm.settings.summaryBackend == .openai {
                     APIKeyRow(title: "OpenAI API key", keyID: "openai_api_key")
@@ -152,16 +186,19 @@ struct SettingsView: View {
                 }
             }
 
-            if vm.settings.transcriptionBackend == .whisper || vm.settings.summaryBackend == .localModel {
-                Section("Offline model downloads") { LocalModelSetupView(vm: vm) }
+            if vm.settings.transcriptionBackend != .deepgram || vm.settings.summaryBackend == .localModel {
+                Section("On-device downloads") { LocalModelSetupView(vm: vm) }
             }
 
             Section("General") {
-                Toggle("Show toasts", isOn: binding(\.showToasts))
+                Toggle("Show brief status messages", isOn: binding(\.showToasts))
                 Toggle("Notify when a summary is ready", isOn: binding(\.notifyOnSummary))
             }
         }
-        .onAppear { inputDevices = AudioDevices.inputs() }
+        .onAppear { if externalActionsEnabled { inputDevices = AudioDevices.inputs() } }
+        .onChange(of: vm.settings.notifyOnSummary) { _, enabled in
+            if enabled && externalActionsEnabled { MeetingNotifications.requestAuthorization() }
+        }
         .formStyle(.grouped)
         .frame(minWidth: 440, minHeight: 520)
     }
@@ -175,11 +212,12 @@ struct SettingsView: View {
 // AppKit for a file dialog.
 private struct StorageDirectoryRow: View {
     @ObservedObject var vm: TranscriberViewModel
+    @Environment(\.externalActionsEnabled) private var externalActionsEnabled
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
         HStack {
-            Text("Data location")
+            Text("Meeting folder")
                 .font(.subheadline)
             Spacer()
             Text(displayPath)
@@ -189,15 +227,15 @@ private struct StorageDirectoryRow: View {
                 .truncationMode(.middle)
             Button("Choose…") { chooseDirectory() }
             if vm.settings.storageDirectory != StorageDirectory.defaultDirectory {
-                Button("Reset", role: .destructive) {
+                Button("Use default folder") {
                     vm.updateSettings { $0.storageDirectory = StorageDirectory.defaultDirectory }
                 }
             }
         }
-        Text("Location changes take effect after restarting Transcriber. Existing meetings stay in their original folder.")
+        Text("After restarting, Transcriber opens the selected folder. Existing meetings are not moved.")
             .font(.caption).foregroundStyle(.secondary)
         }
-        .disabled(vm.isRecording)
+        .disabled(!externalActionsEnabled || vm.isRecording || vm.isStarting || vm.isStopping)
     }
 
     private var displayPath: String {
@@ -210,7 +248,7 @@ private struct StorageDirectoryRow: View {
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
         panel.prompt = "Choose"
-        panel.message = "Choose where Transcriber stores its data (meetings + recordings)."
+        panel.message = "Choose a folder for your summaries, recordings, and transcripts."
         panel.directoryURL = StorageDirectory.base(settings: vm.settings)
         if panel.runModal() == .OK, let url = panel.url {
             vm.updateSettings { $0.storageDirectory = url }
@@ -224,6 +262,7 @@ private struct StorageDirectoryRow: View {
 // never written to settings.json and never echoed back into the field (so the
 // UI shows a "stored" indicator instead of the secret).
 private struct APIKeyRow: View {
+    @Environment(\.externalActionsEnabled) private var enabled
     let title: String
     let keyID: String
 
@@ -239,7 +278,7 @@ private struct APIKeyRow: View {
                     .font(.subheadline)
                 Spacer()
                 if hasStored {
-                    Label("stored", systemImage: "checkmark.circle.fill")
+                    Label("Saved", systemImage: "checkmark.circle.fill")
                         .font(.caption)
                         .foregroundStyle(.green)
                 }
@@ -250,11 +289,11 @@ private struct APIKeyRow: View {
                 Button("Save") { save() }
                     .disabled(value.isEmpty)
                 if hasStored {
-                    Button("Clear", role: .destructive) { clear() }
+                    Button("Remove key", role: .destructive) { clear() }
                 }
             }
             if justSaved {
-                Text("Saved to the Keychain.")
+                Text("Saved securely in Keychain.")
                     .font(.caption)
                     .foregroundStyle(.green)
             }
@@ -264,11 +303,12 @@ private struct APIKeyRow: View {
                     .foregroundStyle(.red)
             }
         }
-        .onAppear { hasStored = (Keychain.get(keyID)?.isEmpty == false) }
+        .disabled(!enabled)
+        .onAppear { if enabled { hasStored = (Keychain.get(keyID)?.isEmpty == false) } }
     }
 
     private func save() {
-        guard !value.isEmpty else { return }
+        guard enabled, !value.isEmpty else { return }
         do {
             try Keychain.set(value, for: keyID)
             hasStored = true
@@ -282,6 +322,7 @@ private struct APIKeyRow: View {
     }
 
     private func clear() {
+        guard enabled else { return }
         do {
             try Keychain.delete(keyID)
             hasStored = false

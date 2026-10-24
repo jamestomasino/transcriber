@@ -35,14 +35,15 @@ public enum MeetingNotifications {
         }
     }
 
-    /// Post a decided notification. `isError` picks the sound; the copy is
+    /// Post a decided notification using the normal notification sound. The copy is
     /// verbatim from the pure decision. Never throws — a failed post is
     /// logged-and-forgotten.
     public static func post(_ note: MeetingNotification) {
         let content = UNMutableNotificationContent()
         content.title = note.title
         content.body = note.body
-        content.sound = note.isError ? .defaultCritical : .default
+        // Ordinary meeting updates respect normal notification and Focus settings.
+        content.sound = .default
         content.categoryIdentifier = identifier
 
         let request = UNNotificationRequest(

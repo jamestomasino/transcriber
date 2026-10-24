@@ -17,6 +17,7 @@ import TranscriberCore
 // clipboard); the data + text formatting stay pure in Core.
 struct MeetingDetailView: View {
     @ObservedObject var vm: TranscriberViewModel
+    @Environment(\.externalActionsEnabled) private var externalActionsEnabled
     let meeting: Meeting
 
     @State private var copied: String? = nil
@@ -42,6 +43,13 @@ struct MeetingDetailView: View {
                 } else {
                     emptyBody
                 }
+                if let saved = live?.summary, live?.status == .failed || live?.status == .processing {
+                    Divider()
+                    if live?.pendingArtifactDeletion.isEmpty == true {
+                        Text("Showing your previously saved summary.").font(.caption).foregroundStyle(.secondary)
+                    }
+                    summaryBody(saved)
+                }
                 if let t = live?.transcript, !t.isEmpty {
                     Divider()
                     transcriptBody(t)
@@ -53,7 +61,7 @@ struct MeetingDetailView: View {
         }
         .textSelection(.enabled)
         .frame(minWidth: 380, maxWidth: .infinity)
-        .confirmationDialog("Delete this meeting and its retained audio and transcript?", isPresented: $confirmDelete) {
+        .confirmationDialog("Delete this meeting, its summary, and any saved recording or transcript?", isPresented: $confirmDelete) {
             Button("Delete meeting", role: .destructive) { vm.delete(id: meeting.id) }
             Button("Cancel", role: .cancel) {}
         }
@@ -69,29 +77,35 @@ struct MeetingDetailView: View {
                 Spacer()
                 statusBadge
             }
-            HStack(spacing: 12) {
-                Label(dateString, systemImage: "calendar")
-                Label(durationString, systemImage: "clock")
-                if let n = live?.speakerCount, n > 0 {
-                    Label(live?.speakerAttribution == .unverified ? "Speaker labels unverified" : "\(n) \(live?.speakerAttribution == .voiceClustering ? "estimated " : "")speaker\(n == 1 ? "" : "s")", systemImage: "person.2")
-                }
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 12) { meetingMetadata }
+                VStack(alignment: .leading, spacing: 4) { meetingMetadata }
             }
             .font(.callout)
             .foregroundStyle(.secondary)
         }
     }
 
+    @ViewBuilder private var meetingMetadata: some View {
+        Label(dateString, systemImage: "calendar")
+        Label(durationString, systemImage: "clock")
+        if let n = live?.speakerCount, n > 0 {
+            Label(live?.speakerAttribution == .unverified ? "Speaker labels unverified" : "\(n) \(live?.speakerAttribution == .voiceClustering ? "estimated " : "")speaker\(n == 1 ? "" : "s")", systemImage: "person.2")
+        }
+    }
+
     private var statusBadge: some View {
         let status = live?.status ?? meeting.status
-        let (text, color): (String, Color)
+        let color: Color
         switch status {
-        case .recording:  (text, color) = ("Recording", .orange)
-        case .processing: (text, color) = ("Processing…", .blue)
-        case .summarized: (text, color) = ("Summarized", .green)
-        case .failed:     (text, color) = ("Failed", .red)
+        case .recording: color = .orange
+        case .processing: color = .blue
+        case .summarized: color = .green
+        case .failed: color = live?.processingRequest == nil ? .red : .orange
         }
-        return Text(status.rawValue)
+        return Text(MeetingPresentation.status(live ?? meeting, work: vm.workByMeeting[meeting.id], compact: true))
             .font(.caption.bold())
+            .fixedSize()
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
             .background(color.opacity(0.15))
@@ -112,7 +126,6 @@ struct MeetingDetailView: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.bottom, 4)
         }
-        if !s.model.isEmpty { Text("Summary model: \(s.model)").font(.caption).foregroundStyle(.secondary) }
         Text(s.overall.isEmpty ? "—" : s.overall)
             .font(.body)
             .fixedSize(horizontal: false, vertical: true)
@@ -172,21 +185,19 @@ struct MeetingDetailView: View {
 
     private var failedBody: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label("This meeting's summary couldn't be generated.",
+            Label(live?.processingRequest != nil ? "Your notes are ready to resume" : "This meeting needs attention",
                   systemImage: "exclamationmark.triangle.fill")
                 .font(.headline)
-                .foregroundStyle(.red)
+                .foregroundStyle(live?.processingRequest == nil ? Color.red : Color.orange)
+            Text(MeetingPresentation.recovery(live ?? meeting))
+                .font(.callout).foregroundStyle(.secondary)
+            SettingsLink { Text("Open Settings") }
             if let err = live?.failureReason {
-                Text(err)
+                DisclosureGroup("Details") { Text(err)
                     .font(.callout)
                     .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                    .fixedSize(horizontal: false, vertical: true) }
             }
-            Text(live?.transcript.isEmpty == false
-                 ? "The transcript is saved. Retry summary uses your current summary backend; Transcribe again also reruns speech recognition."
-                 : "Retry uses the current transcription and summary backends.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
         }
     }
 
@@ -199,8 +210,8 @@ struct MeetingDetailView: View {
                  : processingDescription)
                 .font(.callout)
                 .foregroundStyle(.secondary)
-                if live?.processingRequest != nil, live?.status == .processing {
-                    Text("Uses the model and retention settings chosen when queued.")
+                if live?.status == .processing, MeetingPresentation.settingsChanged(live ?? meeting, current: vm.settings) {
+                    Text("Your settings have changed. This meeting will finish using your earlier choices.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 if let progress = vm.progressByMeeting[meeting.id], progress.stage == .diarizing, progress.fraction > 0 {
@@ -214,7 +225,7 @@ struct MeetingDetailView: View {
 
     private var processingDescription: String {
         if let state = vm.workByMeeting[meeting.id], state != .running { return state.description }
-        return (vm.progressByMeeting[meeting.id]?.stage.rawValue.capitalized ?? "Working on it") + "…"
+        return vm.progressByMeeting[meeting.id].map { MeetingPresentation.activity($0.stage) } ?? "Preparing your notes…"
     }
 
     private var emptyBody: some View {
@@ -226,9 +237,16 @@ struct MeetingDetailView: View {
     // MARK: - Actions
 
     private var actions: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 10) { actionButtons }
-            VStack(alignment: .leading, spacing: 10) { actionButtons }
+        VStack(alignment: .leading, spacing: 10) {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 10) { actionButtons }
+                VStack(alignment: .leading, spacing: 10) { actionButtons }
+            }
+            if let model = live?.summary?.model, !model.isEmpty {
+                DisclosureGroup("About this summary") {
+                    Text("Created with \(model)").font(.caption).foregroundStyle(.secondary)
+                }
+            }
         }
     }
 
@@ -237,7 +255,8 @@ struct MeetingDetailView: View {
                 Button("Cancel processing") { vm.cancelProcessing(id: meeting.id) }
             }
             if live?.status == .failed, live?.processingRequest != nil {
-                Button("Cancel pending processing") { vm.cancelProcessing(id: meeting.id) }
+                Button("Cancel this attempt") { vm.cancelProcessing(id: meeting.id) }
+                    .help("Keeps the saved recording and transcript so you can try again with current settings.")
             }
             if live?.status == .recording {
                 Button("Stop recording") { vm.stop() }.disabled(vm.isStarting)
@@ -247,7 +266,7 @@ struct MeetingDetailView: View {
                     retrying = true
                     Task { await vm.retry(id: meeting.id); retrying = false }
                 } label: {
-                    Label(live?.processingRequest != nil ? "Resume processing" : (live?.transcript.isEmpty == false ? "Retry summary" : "Retry"), systemImage: "arrow.clockwise")
+                    Label(live?.processingRequest != nil ? "Resume" : "Try again", systemImage: "arrow.clockwise")
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(retrying)
@@ -257,6 +276,7 @@ struct MeetingDetailView: View {
                     retrying = true
                     Task { await vm.retry(id: meeting.id, reuseTranscript: false); retrying = false }
                 }.disabled(retrying)
+                .help("Create a new transcript and summary from the saved recording using your current settings.")
             }
             if let s = live?.summary, !s.overall.isEmpty {
                 Button {
@@ -276,7 +296,9 @@ struct MeetingDetailView: View {
             }
             if let url = live?.audioFileURLs.values.first {
                 Button { NSWorkspace.shared.activateFileViewerSelecting([url]) } label: { Image(systemName: "folder") }
-                    .help("Show retained audio in Finder")
+                    .help("Show saved recording in Finder")
+                    .accessibilityLabel("Show recording in Finder")
+                    .disabled(!externalActionsEnabled)
             }
             Button(role: .destructive) {
                 confirmDelete = true

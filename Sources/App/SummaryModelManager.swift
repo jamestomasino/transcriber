@@ -144,7 +144,7 @@ final class SummaryModelManager: ObservableObject {
                 try Task.checkCancellation()
                 try await registry.merge(found)
                 await load()
-                message = "Found \(found.count) choices that fit this Mac. Fit recommendations are estimates; a local check runs before switching."
+                message = "Found \(found.count) models suited to this Mac. Compatibility is checked before switching."
             } catch { message = error is CancellationError ? "Model check cancelled. Your current model is unchanged." : error.localizedDescription }
         }
     }
@@ -181,7 +181,7 @@ final class SummaryModelManager: ObservableObject {
                     )
                 }
                 await load(selectedID: option.id)
-                message = warning.map { "The new model is selected. The old download could not be removed: \($0)" }
+                message = warning.map { "The new model is ready. The previous download could not be removed: \($0)" }
                     ?? "Using \(option.asset.displayName). The previous model download was removed."
             } catch { message = error is CancellationError ? "Switch cancelled. Your current model was kept." : error.localizedDescription }
         }

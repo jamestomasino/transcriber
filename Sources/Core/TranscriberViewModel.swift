@@ -311,6 +311,7 @@ public final class TranscriberViewModel: ObservableObject {
             meetings = engine.recent; activeMeeting = engine.active
             return false
         }
+        meetings = engine.recent
         meeting.processingRequest = request
         if !request.reuseTranscript { meeting.transcript = [] }
         let speakerOnly = request.speakerOnly
@@ -458,7 +459,7 @@ public final class TranscriberViewModel: ObservableObject {
     /// this only performs the side effect (calling the injected poster).
     private func notifyTerminal(id: UUID, errorDescription: String?) {
         if let meeting = engine.meeting(id: id) {
-            showToast(meeting.status == .summarized ? "Summary ready: \(meeting.title)" : "Meeting failed: \(meeting.title)")
+            showToast(meeting.status == .summarized ? "Summary ready: \(meeting.title)" : "Meeting needs attention: \(meeting.title)")
         }
         guard let meeting = engine.meeting(id: id),
               let note = MeetingNotificationPolicy.notification(

@@ -43,12 +43,21 @@ For isolated UI inspection:
 bash Validation/run.sh preview --empty  # onboarding
 bash Validation/run.sh preview          # seeded summary detail
 bash Validation/run.sh preview --settings # local vocabulary and settings
+bash Validation/run.sh preview --settings --cloud # cloud disclosures and key fields
+bash Validation/run.sh preview --failed # summary retry with a saved transcript
+bash Validation/run.sh preview --resume # interrupted attempt
+bash Validation/run.sh preview --waiting # resource-related waiting
+bash Validation/run.sh preview --queue --snapshot /tmp/transcriber-preview.png
 ```
 
 The preview uses in-memory meetings/settings and a no-op artifact manager. It
-never loads or sweeps the user's real data. Recording and provider-key edits
-are disabled in the fixture. Close the previous preview before
-launching another; the normal app can remain running.
+never loads or sweeps the user's real data. A banner and window title identify
+the sample meetings. Recording, downloads, credential reads/edits, and permission
+requests are disabled. Close the previous preview before launching another; the
+normal app can remain running. `--snapshot <path>` renders only the preview's own
+content view and closes the preview automatically. It does not capture the desktop
+or require screen-recording permission. These bitmap snapshots support copy/layout
+inspection; native button/material compositing can differ from the displayed window.
 
 `run.sh` reuses the SDK selected by the last `build.sh` invocation (recorded in
 `build/sdk-path`). Run `bash build.sh test` again after changing installed SDKs.

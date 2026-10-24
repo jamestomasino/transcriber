@@ -11,14 +11,23 @@ extension EnvironmentValues {
     }
 }
 
+private func displayModelText(_ value: String) -> String {
+    value.replacingOccurrences(of: "Q4_K_M", with: "4-bit").replacingOccurrences(of: "-GGUF", with: "")
+        .replacingOccurrences(of: "Whisper runtime", with: "transcription tools")
+        .replacingOccurrences(of: "Summary runtime", with: "summary tools")
+        .replacingOccurrences(of: "Speaker analysis runtime", with: "speaker identification tools")
+        .replacingOccurrences(of: "Speaker segmentation", with: "speaker identification model")
+        .replacingOccurrences(of: "Speaker voice embeddings", with: "voice matching model")
+}
+
 struct LocalModelDownloadBanner: View {
     @ObservedObject private var status = LocalModelStatus.shared
     var body: some View {
         if let activity = status.activity {
             VStack(alignment: .leading, spacing: 4) {
-                Text(activity).font(.callout)
+                Text(displayModelText(activity)).font(.callout)
                 ProgressView(value: status.fraction)
-                Text("Model downloads contain no meeting data. Processing stays on this Mac.").font(.caption).foregroundStyle(.secondary)
+                Text("These downloads do not include your recordings or transcripts.").font(.caption).foregroundStyle(.secondary)
             }.padding(12)
         }
     }
@@ -33,10 +42,12 @@ struct LocalModelSetupView: View {
     @State private var task: Task<Void, Never>?
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Download once, then use offline. Local models run one at a time. Check available summary models in Settings for choices suited to this Mac.")
+            Text(vm.settings.transcriptionBackend == .local && vm.settings.summaryBackend != .localModel
+                 ? "Download speaker identification tools once to label voices on this Mac."
+                 : "Download the models needed for your on-device options. Once downloaded, they work offline.")
                 .font(.caption).foregroundStyle(.secondary)
             HStack {
-                Button(downloading ? "Downloading…" : "Download selected local models") {
+                Button(downloading ? "Downloading…" : "Download selected models") {
                     let requested = vm.settings
                     downloading = true; message = nil
                     task = Task {
@@ -53,22 +64,25 @@ struct LocalModelSetupView: View {
                                 _ = try await LocalModelAssets.shared.ensure(option.asset)
                                 _ = try await LocalModelAssets.shared.runtime(whisper: false)
                             }
-                            message = "Requested models are ready for offline use."
+                            message = "Your selected models are ready to use offline."
                         } catch { message = error is CancellationError ? "Download cancelled. You can retry it later." : error.localizedDescription }
                         downloading = false; task = nil
                     }
                 }.disabled(downloading || !enabled)
                 if downloading { Button("Cancel") { task?.cancel() } }
             }
-            if let activity = status.activity { Text(activity).font(.caption); ProgressView(value: status.fraction) }
+            if let activity = status.activity { Text(displayModelText(activity)).font(.caption); ProgressView(value: status.fraction) }
             if let message { Text(message).font(.caption).foregroundStyle(.secondary) }
-            if !enabled { Text("Model downloads are disabled in this isolated preview.").font(.caption) }
+            DisclosureGroup("Download details") {
             HStack {
                 Link("Whisper model source", destination: URL(string: "https://huggingface.co/ggerganov/whisper.cpp")!)
                 Link("Qwen model and license", destination: URL(string: "https://huggingface.co/Qwen/Qwen3.5-4B")!)
             }.font(.caption)
-            Text("Missing models also download on first use. Leave space for about 4.2 GB with Large v3 and the 4B summarizer, plus runtime files. Local speaker matching adds about 65 MB of downloads.")
+            Text(vm.settings.transcriptionBackend == .local && vm.settings.summaryBackend != .localModel
+                 ? "Speaker identification needs about 65 MB. It also downloads automatically the first time you process a meeting."
+                 : "The standard Whisper and Qwen models together need about 4.2 GB, plus supporting files. Other choices may need more space. Missing downloads also start when you first process a meeting with these options.")
                 .font(.caption).foregroundStyle(.secondary)
+            }
         }
     }
 }
@@ -84,14 +98,14 @@ struct SummaryModelSelectionView: View {
     private var memoryDescription: String { ByteCountFormatter.string(fromByteCount: Int64(manager.memoryBytes), countStyle: .memory) }
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Current: \(manager.models.first { $0.id == vm.settings.summaryModel }?.asset.displayName ?? "Selected local model")")
+            Text("Selected: \(displayModelText(manager.models.first { $0.id == vm.settings.summaryModel }?.asset.displayName ?? "Selected local model"))")
                 .font(.callout)
             Picker("Available summary models", selection: Binding(get: { choiceID }, set: { choice = $0 })) {
                 ForEach(manager.models) { model in
-                    Text(model.asset.displayName + (model.id == manager.recommendedID ? " · Recommended fit" : "")).tag(model.id)
+                    Text(displayModelText(model.asset.displayName) + (model.id == manager.recommendedID ? " · Suggested for this Mac" : "")).tag(model.id)
                 }
                 if !manager.models.contains(where: { $0.id == vm.settings.summaryModel }) {
-                    Text("Selected model — check catalog to restore details").tag(vm.settings.summaryModel)
+                    Text("Selected model · check available models for details").tag(vm.settings.summaryModel)
                 }
             }.disabled(manager.busy)
             if let option = selected {
@@ -102,22 +116,22 @@ struct SummaryModelSelectionView: View {
                     Text("This model needs more memory. Choose a smaller model for this Mac.").font(.caption).foregroundStyle(.secondary)
                 }
                 if !SummaryModelFit.knownArchitectures.contains(option.architecture) {
-                    Text("This newer model may need an updated runtime. It must pass a local check before replacing the current model.")
+                    Text("This model may require a newer version of Transcriber. Compatibility is checked before switching.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                if manager.checked.contains(option.id) { Text("Previously passed the local check on this Mac.").font(.caption).foregroundStyle(.secondary) }
+                if manager.checked.contains(option.id) { Text("Previously checked for compatibility on this Mac.").font(.caption).foregroundStyle(.secondary) }
             }
             HStack {
                 Button("Check available models") { manager.scan() }.disabled(manager.busy || !enabled)
-                Button("Download & switch") { if let selected { manager.install(selected, vm: vm) } }
+                Button("Download and use") { if let selected { manager.install(selected, vm: vm) } }
                     .disabled(!enabled || manager.busy || !vm.canReplaceLocalModel || choiceID == vm.settings.summaryModel || selected.map { !SummaryModelFit.fits($0, memoryBytes: manager.memoryBytes) } != false)
                 if manager.busy { Button("Cancel") { manager.cancel() } }
             }
-            Text("Fit estimates use this Mac's \(memoryDescription) of shared memory. A local notes check runs before switching. The previous weights are deleted only after the new model and selection are safely saved. Leave room for both during the download.")
+            Text("Suggestions are based on this Mac’s \(memoryDescription) of memory. Your current model stays available until its replacement is ready. Allow space for both downloads while switching.")
                 .font(.caption).foregroundStyle(.secondary)
-            if !vm.canReplaceLocalModel { Text("Finish recording or processing before switching models.").font(.caption).foregroundStyle(.secondary) }
-            if let phase = manager.phase { ProgressView(); Text(phase).font(.caption) }
-            if let message = manager.message { Text(message).font(.caption).foregroundStyle(.secondary) }
+            if !vm.canReplaceLocalModel { Text("Finish or cancel pending meetings before changing the downloaded summary model.").font(.caption).foregroundStyle(.secondary) }
+            if let phase = manager.phase { ProgressView(); Text(displayModelText(phase)).font(.caption) }
+            if let message = manager.message { Text(displayModelText(message)).font(.caption).foregroundStyle(.secondary) }
         }
         .task { if enabled { await manager.load(selectedID: vm.settings.summaryModel) } }
     }

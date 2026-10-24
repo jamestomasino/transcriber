@@ -80,10 +80,12 @@ struct ContentView: View {
         HStack(spacing: 10) {
             AppIconView()
                 .frame(width: 28, height: 28)
+                .accessibilityHidden(true)
                 .clipShape(RoundedRectangle(cornerRadius: 6))
             Spacer()
             Button { showSetup = true } label: { Image(systemName: "questionmark.circle") }
                 .help("Setup and permissions")
+                .accessibilityLabel("Recording setup")
             if vm.isRecording || vm.isStopping {
                 HStack(spacing: 8) {
                     Image(systemName: "circle.fill")
@@ -98,7 +100,7 @@ struct ContentView: View {
                 Button {
                     vm.stop()
                 } label: {
-                    Label("Stop", systemImage: "stop.circle.fill")
+                    Label("Stop recording", systemImage: "stop.circle.fill")
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(vm.isStarting || vm.isStopping)
@@ -110,7 +112,7 @@ struct ContentView: View {
                     vm.start(title: newTitle.isEmpty ? nil : newTitle)
                     newTitle = ""
                 } label: {
-                    Label("Start", systemImage: "mic.fill")
+                    Label("Start recording", systemImage: "mic.fill")
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(vm.settings.requestedSources.isEmpty || vm.isStarting || vm.isStopping)
@@ -130,7 +132,7 @@ struct ContentView: View {
                          level: vm.level(.mic),
                          icon: "mic.fill",
                          active: vm.settings.captureMic && vm.captureStatus[.mic] == nil)
-                LevelBar(title: "System audio",
+                LevelBar(title: "Other apps",
                          level: vm.level(.system),
                          icon: "speaker.wave.2.fill",
                          active: vm.settings.captureSystem && vm.captureStatus[.system] == nil)
@@ -148,8 +150,19 @@ struct ContentView: View {
             Label(vm.hasCaptureProblem ? "Some audio isn't being captured" : "Meeting needs attention", systemImage: "exclamationmark.triangle.fill")
                 .font(.headline)
                 .foregroundStyle(.orange)
-            if let error = vm.processingError { Text(error).font(.callout).foregroundStyle(.secondary) }
-            Button("Setup and permissions") { showSetup = true }
+            if let error = vm.processingError {
+                DisclosureGroup("Details") { Text(error).font(.callout).foregroundStyle(.secondary).textSelection(.enabled) }
+            }
+            if vm.hasCaptureProblem {
+                Button("Check audio access") { showSetup = true }
+            } else {
+                HStack {
+                    if let meeting = vm.meetings.first(where: { $0.status == .failed }) {
+                        Button("View meeting") { selection = meeting.id }
+                    }
+                    SettingsLink { Text("Open Settings") }
+                }
+            }
             ForEach(vm.captureStatusMessages, id: \.self) { msg in
                 Text(msg)
                     .font(.callout)
@@ -178,27 +191,29 @@ struct ContentView: View {
                     Text("No meetings yet").foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if vm.search(query).isEmpty {
+                VStack(spacing: 8) {
+                    Text("No matching meetings").font(.headline)
+                    Text("Try a different name or a word from your notes.").font(.callout).foregroundStyle(.secondary)
+                    Button("Clear search") { query = "" }
+                }.padding().frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 List(selection: $selection) {
                     ForEach(vm.search(query)) { m in
                         HStack {
-                            Image(systemName: statusIcon(m.status))
-                                .foregroundStyle(statusColor(m.status))
+                            Image(systemName: m.status == .failed && m.processingRequest != nil ? "pause.circle" : statusIcon(m.status))
+                                .foregroundStyle(m.status == .failed && m.processingRequest != nil ? Color.orange : statusColor(m.status))
                                 .frame(width: 18)
                             VStack(alignment: .leading, spacing: 3) {
-                                Text(m.title).font(.headline)
+                                Text(m.title).font(.headline).lineLimit(2)
                                 Text(m.startedAt, style: .date)
                                     .font(.caption).foregroundStyle(.secondary)
-                                Text(vm.workByMeeting[m.id]?.description ?? (m.processingRequest != nil && m.status == .failed ? "Interrupted — select to resume" : statusLabel(m.status)))
+                                Text(MeetingPresentation.status(m, work: vm.workByMeeting[m.id]))
+                                    .lineLimit(2)
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
                             Spacer()
-                            if let s = m.summary, !s.overall.isEmpty {
-                                Text(s.overall)
-                                    .lineLimit(1)
-                                    .foregroundStyle(.secondary)
-                            }
                         }
                         .tag(m.id)
                     }
@@ -231,14 +246,7 @@ struct ContentView: View {
         }
     }
 
-    private func statusLabel(_ s: MeetingStatus) -> String {
-        switch s {
-        case .recording:  return "Recording"
-        case .processing: return "Processing…"
-        case .summarized: return "Summarized"
-        case .failed:     return "Failed — select to retry"
-        }
-    }
+
 }
 
 // MARK: - Level bar

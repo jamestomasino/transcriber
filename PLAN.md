@@ -15,7 +15,7 @@ only the **summary** — deleting the audio and the transcript.
 > resource profile and validation limits. Earlier sections preserve design history.
 >
 > Phases 0–7 and the local model pivot are implemented. The CLT-only build and
-> SDK fallback remain required. `bash build.sh test` passes 541 assertions and
+> SDK fallback remain required. `bash build.sh test` passes 555 assertions and
 > real media, cache, transport and cleanup checks. Live checks exercised local
 > Whisper pharma terms and a real recording excerpt; the downloaded summarizer
 > recovered a real meeting from its retained transcript. A subsequent complete
@@ -1199,3 +1199,37 @@ resource caveats are recorded in docs/LOCAL_MODELS.md. Startup time, run order,
 thermal state and system swap confound a simple speed comparison; keep the
 production four-thread limits. No VAD, decoder, model or runtime candidate was
 activated. Longer foreground/capture validation remains the rollout gate.
+
+## 31. End-user UI review
+
+The main window, meeting details, recording setup, Settings, model downloads,
+recovery actions and notifications now describe the user's task rather than
+implementation phases. Waiting explains the reason or position in line; active
+work names transcription, speaker identification or summary creation. Internal
+enum names and routine explanations of queues, context limits and runtimes are
+removed from the main flow. Detailed errors and model provenance remain available
+under disclosures. Recording labels are consistent in the window and menu.
+
+Recovery guidance follows saved artifacts and processing choices. Resume uses
+the earlier choices; a changed-settings warning appears only when relevant.
+Saved summaries stay readable during a failed or active retry, and cleanup
+failures explicitly say the summary is saved. Recording source controls cannot
+change during capture transitions. Storage actions explain the restart and do
+not imply existing meetings move. Setup and Settings distinguish local processing
+from audio/transcript uploads to the selected cloud service. Download messaging
+does not claim that all processing is local. Apple Speech users can explicitly
+prepare speaker tools. Ordinary notifications use the normal sound and respect
+the saved notification preference.
+
+The previously visible fixture names belonged to validation windows left open,
+not the production library. Previews now use representative sample meeting names,
+a visible sample-data banner and explicit window title. They cannot read or edit
+Keychain credentials, request permissions, download models or open the real store.
+Optional own-window snapshots close previews automatically; native compositing
+in those bitmaps is not a substitute for interactive contrast checks.
+
+Validation: the CLT-only build and 555 assertions cover presentation/recovery,
+saved-choice publication and existing processing/retention behavior, with actual
+media and helper checks. Isolated rendered previews cover summary, waiting,
+recovery, setup and Settings. This UI review does not establish the separate
+long-meeting foreground/capture workload acceptance in section 30.

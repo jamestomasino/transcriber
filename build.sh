@@ -20,6 +20,7 @@ RES_DIR="${APP_DIR}/Contents/Resources"
 
 CORE_SRC=(
   Sources/Core/Meeting.swift
+  Sources/Core/MeetingPresentation.swift
   Sources/Core/BackgroundProcessing.swift
   Sources/Core/TranscriptCleanup.swift
   Sources/Core/MeetingEngine.swift

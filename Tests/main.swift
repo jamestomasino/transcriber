@@ -1894,14 +1894,14 @@ do {
         errorDescription: "whisper model not found", settings: AppSettings()
     )
     check(failed?.isError == true, "failed: flagged as an error")
-    check(failed?.body.contains("whisper model not found") == true,
-          "failed: body carries the reason")
-    check(failed?.body.contains("retry") == true, "failed: body points the user to retry")
+    check(failed?.body.contains("whisper model not found") == false,
+          "failed: implementation details stay in the meeting instead of the notification")
+    check(failed?.body.contains("try again") == true, "failed: body points the user to retry")
 
     let failedNoReason = MeetingNotificationPolicy.notification(
         for: mk("Sync", .failed), errorDescription: nil, settings: AppSettings()
     )
-    check(failedNoReason?.body.contains("retry") == true,
+    check(failedNoReason?.body.contains("try again") == true,
           "failed (no reason): still says to retry")
 
     check(MeetingNotificationPolicy.notification(
@@ -1972,7 +1972,7 @@ do {
     check(badVM.meetings.first(where: { $0.id == badM.id })?.status == .failed, "failure: meeting failed")
     check(badRec.notes.count == 1, "failure: exactly one notification posted")
     check(badRec.notes.first?.isError == true, "failure: notification flagged as an error")
-    check(badRec.notes.first?.body.contains("retry") == true, "failure: body points to retry")
+    check(badRec.notes.first?.body.contains("try again") == true, "failure: body offers an action without diagnostic details")
 
     // --- notifyOnSummary off → no notification even on success ---
     let offDir = FileManager.default.temporaryDirectory
@@ -2349,6 +2349,8 @@ do {
     let m = await vm.startAsync(title: "Cancel me")
     let task = Task { await vm.stopAsync() }
     while vm.progressByMeeting[m.id] == nil { await Task.yield() }
+    check(vm.meetings.first(where: { $0.id == m.id })?.processingRequest != nil,
+          "the UI receives saved processing choices while notes are being prepared")
     vm.cancelProcessing(id: m.id)
     await task.value
     let cancelled = vm.meeting(id: m.id)!
@@ -2805,6 +2807,40 @@ do {
     check(measurements.contains { $0.stage == "summary.section" && $0.inputTokens == 1000 && $0.outputTokens == 30 },
           "summary diagnostics capture actual runtime token usage without prompt text")
 } catch { check(false, "shared preparation/context: \(error)") }
+
+section("meeting presentation follows user-visible state and recovery")
+do {
+    var meeting = Meeting(title: "Review", status: .processing, startedAt: t0, createdAt: t0, lastActivityAt: t0)
+    check(MeetingPresentation.status(meeting, work: .queued(position: 2)) == ProcessingWorkState.queued(position: 2).description,
+          "meeting list and detail use the same waiting state")
+    check(MeetingPresentation.status(meeting, work: .deferred(reason: "a recording is in progress")).contains("recording"),
+          "deferred status explains why notes are waiting")
+    check(MeetingPresentation.status(meeting, work: .deferred(reason: "a recording is in progress"), compact: true) == "Waiting",
+          "badges keep the detailed waiting reason in the body rather than stretching the title row")
+    check(MeetingPresentation.activity(.diarizing).contains("speakers"), "speaker analysis uses a user-recognizable activity name")
+    meeting.status = .failed
+    meeting.transcript = [TranscriptSegment(speaker: "Alex", text: "Send the notes Friday.")]
+    check(MeetingPresentation.recovery(meeting).contains("transcript is saved"), "summary retry explains that the existing transcript is available")
+    check(!MeetingPresentation.recovery(meeting).contains("Transcribe again"), "recovery does not offer retranscription without a recording")
+    meeting.audioFileURLs = [.mic: URL(fileURLWithPath: "/isolated/recording.wav")]
+    check(MeetingPresentation.recovery(meeting).contains("Transcribe again"), "saved recordings offer a fresh transcription as an alternative")
+    meeting.audioFileURLs = [:]
+    meeting.processingRequest = ProcessingRequest(settings: AppSettings(), reuseTranscript: false)
+    check(MeetingPresentation.status(meeting) == "Ready to resume" && !MeetingPresentation.recovery(meeting).contains("finish the summary"),
+          "interrupted retranscription does not falsely promise a summary-only resume")
+    var settings = AppSettings()
+    settings.showToasts.toggle()
+    check(!MeetingPresentation.settingsChanged(meeting, current: settings), "unrelated notification settings do not produce a processing-settings warning")
+    settings.keepAudioAfterSummary.toggle()
+    check(MeetingPresentation.settingsChanged(meeting, current: settings), "changed saved-recording choices are explained for an existing attempt")
+    meeting.processingRequest = nil; meeting.transcript = []
+    check(MeetingPresentation.recovery(meeting).contains("permissions"), "a missing recording leads to audio setup rather than a misleading summary retry")
+    meeting.status = .summarized
+    check(MeetingPresentation.status(meeting) != meeting.status.rawValue, "completed badges do not expose persisted enum values")
+    meeting.status = .failed; meeting.summary = MeetingSummary(overall: "Saved notes")
+    meeting.pendingArtifactDeletion = [URL(fileURLWithPath: "/isolated/temporary.wav")]
+    check(MeetingPresentation.recovery(meeting).contains("summary is saved"), "file cleanup failures do not claim that summary generation failed")
+}
 
 // MARK: - Report
 print("\n\(passed) passed, \(failed) failed")

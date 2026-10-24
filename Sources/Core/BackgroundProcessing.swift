@@ -47,7 +47,7 @@ public enum ProcessingWorkState: Equatable, Sendable {
     case deferred(reason: String)
     public var description: String {
         switch self {
-        case .queued(let position): return "Queued · position \(position)"
+        case .queued(let position): return "Waiting · \(position) in line"
         case .running: return "Processing"
         case .deferred(let reason): return "Waiting — \(reason)"
         }
@@ -55,7 +55,7 @@ public enum ProcessingWorkState: Equatable, Sendable {
 }
 
 public struct ProcessingResourceInterruption: LocalizedError, Sendable {
-    public var errorDescription: String? { "Processing stopped to protect other applications during critical resource pressure. Audio was kept. Resume when the Mac has recovered." }
+    public var errorDescription: String? { "This Mac needed more memory or time to cool down, so processing stopped. Your recording was kept. Choose Resume when you’re ready." }
     public init() {}
 }
 
@@ -100,7 +100,7 @@ public actor BackgroundProcessingScheduler {
         if conditions.memory != .normal { return "the Mac needs memory for other applications" }
         if conditions.thermal != .normal { return "the Mac is cooling down" }
         if now() < recoverAfter { return "resources are recovering" }
-        if let until = lowPowerDelayUntil, now() < until { return "Low Power Mode is deferring background work briefly" }
+        if let until = lowPowerDelayUntil, now() < until { return "Low Power Mode is on" }
         return nil
     }
     public func checkpoint() async throws {

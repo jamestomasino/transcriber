@@ -260,7 +260,7 @@ public struct MeetingNotification: Equatable, Sendable {
 public enum MeetingNotificationPolicy {
     /// `nil` when `notifyOnSummary` is off. A meeting that reached `.summarized`
     /// posts a "ready" note with the overall line; a `.failed` meeting posts an
-    /// error note with the reason (if known) so the user knows to retry.
+    /// actionable note. Detailed errors stay in the meeting's Details view.
     /// Meetings still `.recording` or `.processing` post nothing — they are not
     /// terminal, so a notification would be premature.
     public static func notification(
@@ -280,10 +280,9 @@ public enum MeetingNotificationPolicy {
                 : "Summary ready: \(overall!)"
             return MeetingNotification(title: title, body: body, isError: false)
         case .failed:
-            let detail = errorDescription?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let body = (detail?.isEmpty ?? true)
-                ? "This meeting failed. Open it to retry."
-                : "This meeting failed: \(detail!). Open it to retry."
+            let body = meeting.processingRequest != nil
+                ? "Your notes are ready to resume. Open Transcriber to continue."
+                : "This meeting needs attention. Open Transcriber to try again."
             return MeetingNotification(title: title, body: body, isError: true)
         case .recording, .processing:
             return nil
