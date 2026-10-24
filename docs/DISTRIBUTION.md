@@ -71,6 +71,28 @@ Recognition as needed, record both sides of a call, and confirm summary
 persistence and retention after relaunch. Do not treat a successful notarization
 as proof that recording permissions and the meeting pipeline work.
 
+## Check notarization credentials from Linux
+
+The developer helper [check_notary_credentials.py](../Validation/check_notary_credentials.py)
+uses Apple's read-only Notary API history endpoint. It requires Python 3, PyJWT
+and cryptography in your development environment; these are not app requirements.
+It keeps the private key and two-minute token in memory, prints only the result,
+and does not submit software or update GitHub secrets.
+
+```bash
+python3 Validation/check_notary_credentials.py \
+  --key "$HOME/Downloads/AuthKey_KEY_ID.p8" \
+  --key-id "KEY_ID" \
+  --issuer "ISSUER_UUID"
+```
+
+Use the API key ID corresponding to the downloaded filename, not the Developer
+Team ID. A UUID issuer and a valid private key do not authenticate if the key ID
+belongs to a different key. HTTP 200 confirms authentication; HTTP 401 means Apple
+rejected it. A successful check does not establish that an app passes notarization.
+Use the entire PEM file, including BEGIN/END lines and internal line breaks;
+a missing final newline is not normally significant.
+
 ## CI
 
 [.github/workflows/release.yml](../.github/workflows/release.yml) builds and tests,
