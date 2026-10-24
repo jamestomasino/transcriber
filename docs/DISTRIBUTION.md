@@ -100,6 +100,8 @@ prevent force pushes or deletion of `main`. Only tag reviewed commits already on
 `main`; the ancestry check does not replace code review.
 
 All actions are pinned to full commit SHAs whose metadata declares Node 24.
+Build jobs use the macOS 26 image for the SpeechAnalyzer SDK while retaining
+the macOS 14 deployment target and the CLT-only `swiftc` build.
 The repository requires SHA pins. Checkouts do not persist credentials. Signing
 runs with `contents: read`; credentials are deleted before packaging/upload, with
 an `always()` cleanup fallback for failures. Hosted runner destruction provides

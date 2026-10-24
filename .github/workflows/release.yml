@@ -53,7 +53,7 @@ jobs:
   build-sign-notarize:
     needs: validate-release
     environment: release
-    runs-on: macos-15       # needs CLT + notarytool
+    runs-on: macos-26       # needs CLT + notarytool
     timeout-minutes: 60
     outputs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
