@@ -19,7 +19,7 @@ struct PreviewApp: App {
     }
     var body: some Scene {
         WindowGroup("Transcriber Validation") {
-            ContentView(vm: vm).onAppear { NSApp.activate(ignoringOtherApps: true) }
+            ContentView(vm: vm).environment(\.localModelDownloadsEnabled, false).onAppear { NSApp.activate(ignoringOtherApps: true) }
         }
         Settings {
             Text("This is an isolated UI fixture. Use the normal Transcriber app to configure recording and provider keys.")

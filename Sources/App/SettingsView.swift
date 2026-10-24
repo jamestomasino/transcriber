@@ -69,10 +69,19 @@ struct SettingsView: View {
 
             Section("Transcription") {
                 Picker("Backend", selection: binding(\.transcriptionBackend)) {
-                    Text("Local — Apple Speech (private, no key)").tag(TranscriptionBackend.local)
+                    Text("Whisper — downloaded model, offline").tag(TranscriptionBackend.whisper)
+                    Text("Apple Speech — offline").tag(TranscriptionBackend.local)
                     Text("Deepgram — accurate speaker ID").tag(TranscriptionBackend.deepgram)
                 }
                 TextField("Language code (e.g. en)", text: binding(\.language))
+                if vm.settings.transcriptionBackend == .whisper {
+                    Picker("Whisper model", selection: binding(\.whisperModel)) {
+                        ForEach(WhisperCatalog.selectable, id: \.id) { Text($0.displayName).tag($0.id) }
+                    }
+                    TextField("Terminology hints (drug names, trials, acronyms)", text: binding(\.transcriptionVocabulary))
+                    Text("Use a short, comma-separated list of relevant terms. Large v3 prioritizes accuracy; Turbo is faster. These are general speech models, not clinically validated pharma models. Speaker labels remain approximate.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 if vm.settings.transcriptionBackend == .local {
                     Text("Runs on this Mac with Apple Speech — private, offline, no model to download.")
                         .font(.caption)
@@ -85,7 +94,8 @@ struct SettingsView: View {
 
             Section("Summary") {
                 Picker("Backend", selection: binding(\.summaryBackend)) {
-                    Text("Local — on-device Apple Intelligence (offline, no key)").tag(SummaryBackend.local)
+                    Text("Downloaded local model — offline").tag(SummaryBackend.localModel)
+                    Text("Apple Intelligence — offline").tag(SummaryBackend.local)
                     Text("OpenAI").tag(SummaryBackend.openai)
                     Text("Anthropic").tag(SummaryBackend.anthropic)
                 }
@@ -93,6 +103,12 @@ struct SettingsView: View {
                     Text("Runs on this Mac with Apple Intelligence — no account, no key, no network. Requires macOS 26+ with Apple Intelligence enabled.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                } else if vm.settings.summaryBackend == .localModel {
+                    Picker("Summary model", selection: binding(\.summaryModel)) {
+                        ForEach(SummaryModelCatalog.all, id: \.id) { Text($0.displayName).tag($0.id) }
+                    }
+                    Text("8 GB or more recommended. The context is bounded to keep memory use predictable; long meetings are processed in complete sections.")
+                        .font(.caption).foregroundStyle(.secondary)
                 } else {
                     TextField("Model identifier", text: binding(\.summaryModel))
                 }
@@ -102,6 +118,10 @@ struct SettingsView: View {
                 if vm.settings.summaryBackend == .anthropic {
                     APIKeyRow(title: "Anthropic API key", keyID: "anthropic_api_key")
                 }
+            }
+
+            if vm.settings.transcriptionBackend == .whisper || vm.settings.summaryBackend == .localModel {
+                Section("Offline model downloads") { LocalModelSetupView(vm: vm) }
             }
 
             Section("General") {

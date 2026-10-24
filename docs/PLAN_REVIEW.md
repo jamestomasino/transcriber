@@ -1,5 +1,10 @@
 # Plan review — 23 October 2026
 
+> Historical implementation review from 23 October 2026. The downloaded Whisper
+> and Qwen workflow is now the standard; Apple/cloud default recommendations and
+> earlier summary limitations below are superseded by [PLAN.md §24](../PLAN.md)
+> and [the current local model profile](LOCAL_MODELS.md).
+
 The implementation was reviewed against all eighteen sections of PLAN.md,
 including the product promises and definition of done, rather than only the
 remaining roadmap bullets. The main improvements were to make real capture,

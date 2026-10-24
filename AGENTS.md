@@ -30,6 +30,29 @@ Guidance for agents (and humans) working in this repo.
   retention path so it is actually cleaned up. Do not leak files to the user's
   home directory or to unmanaged locations.
 
+## Standard processing path
+
+- Fresh installs use **Whisper large-v3 Q5_0** for transcription and
+  **Qwen 3.5 4B Q4_K_M** for summaries. Apple and cloud backends are explicit
+  alternatives; preserve saved user selections and do not silently fall back
+  to a different provider.
+- **Weights and inference runtimes are not bundled.** Download the selected
+  assets only when the user requests setup/downloads or first processes a
+  meeting with that backend. Launching the app or changing a backend alone
+  must not trigger a download. Reuse the verified cache for offline inference.
+- Keep model revisions, exact sizes, runtime versions and SHA-256 checksums
+  pinned. Update Whisper C declarations together with its runtime ABI. Do not
+  introduce Homebrew, CMake, Python or Xcode as end-user prerequisites.
+- Keep inference serialized across meetings, with bounded audio buffers,
+  context and generation. Process every transcript section; do not omit the
+  middle to fit a model. Keep the summary helper private to the app and disable
+  idle prompt caching, agent tools, web UI and prompt logging.
+- Save an opted-in transcript before summarization so summary retries can reuse
+  it. Model downloads and caches are separate from retained meeting artifacts.
+- [docs/LOCAL_MODELS.md](docs/LOCAL_MODELS.md) is the current model profile,
+  asset lifecycle and validation reference. Historical alternatives in PLAN.md
+  do not override this standard.
+
 ## Conventions
 
 - Persistence layers should stay small and swappable; the view model

@@ -51,16 +51,25 @@ struct OnboardingView: View {
             }
             if vm.settings.transcriptionBackend == .local {
                 permission("Speech Recognition", detail: "Turns audio into text on this Mac. Local speaker labels are approximate.", status: speechStatus, pane: "SpeechRecognition", request: requestSpeech)
-            } else {
+            } else if vm.settings.transcriptionBackend == .deepgram {
                 Text("Deepgram receives the recorded audio for transcription and speaker identification.")
+                    .font(.callout).foregroundStyle(.secondary)
+            } else {
+                Text("Whisper transcribes on this Mac using downloaded weights. Local speaker labels are approximate.")
                     .font(.callout).foregroundStyle(.secondary)
             }
             if vm.settings.summaryBackend == .local {
                 Text("Local summaries require macOS 26 or later with Apple Intelligence enabled.")
                     .font(.callout).foregroundStyle(.secondary)
+            } else if vm.settings.summaryBackend == .localModel {
+                Text("Downloaded local summaries run on this Mac. Only public model downloads use the network; your transcript stays local.")
+                    .font(.caption).foregroundStyle(.secondary)
             } else {
                 Text("The transcript is sent to \(vm.settings.summaryBackend == .openai ? "OpenAI" : "Anthropic") for summarization. Add its API key in Settings before recording.")
                     .font(.callout).foregroundStyle(.secondary)
+            }
+            if vm.settings.transcriptionBackend == .whisper || vm.settings.summaryBackend == .localModel {
+                LocalModelSetupView(vm: vm)
             }
             Text(vm.settings.keepAudioAfterSummary || vm.settings.keepTranscriptAfterSummary
                  ? "You have opted to retain audio or transcripts. Review retention in Settings → Storage."

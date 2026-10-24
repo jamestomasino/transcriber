@@ -15,9 +15,8 @@ import Foundation
 //   4. `ModelStore` decides: is the model already cached? If yes, reuse it
 //      (offline, no re-download). If no, download it once, verify, and cache.
 //
-// The default local transcriber path (Apple Speech) needs *no* model at all —
-// it's on-device and private. This download machinery is for the optional
-// whisper.cpp path, where the user picks a size and we fetch it on first use.
+// The App validates pinned hashes for production assets. ModelStore below
+// remains a small injected persistence seam for legacy callers and Core tests.
 
 /// A downloadable model. `id` is a stable key (e.g. "whisper-base") used to
 /// name the cache file; `sizeBytes` is the expected download size (for UI
@@ -28,57 +27,48 @@ public struct ModelSpec: Equatable, Sendable, Codable {
     public var displayName: String
     public var sizeBytes: Int
     public var url: URL
+    public var sha256: String?
 
-    public init(id: String, displayName: String, sizeBytes: Int, url: URL) {
+    public init(id: String, displayName: String, sizeBytes: Int, url: URL, sha256: String? = nil) {
         self.id = id
         self.displayName = displayName
         self.sizeBytes = sizeBytes
         self.url = url
+        self.sha256 = sha256
     }
 }
 
-/// The known Whisper model sizes and their canonical download URLs. These are
-/// the well-known Hugging Face `Systran/faster-whisper-*` GGUF/CT2 weights;
-/// the App layer can override the base URL (e.g. a mirror) if needed.
-///
-/// Sizes are approximate (the UI shows "≈ 150 MB"). The exact byte count is
-/// verified against `sizeBytes` only if the downloader reports a different
-/// total — a mismatch is surfaced as an error rather than silently accepted.
+/// Pinned ggml files supported by the bundled-ABI whisper.cpp runtime.
 public enum WhisperCatalog {
-    /// Base URL the models are fetched from. Overridable (e.g. for a mirror).
-    public static var baseURL: URL =
-        URL(string: "https://huggingface.co/Systran/faster-whisper-base/resolve/main")!
-
+    public static let defaultID = "whisper-large-v3-q5_0"
+    private static let base = "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/"
     public static let all: [ModelSpec] = [
-        ModelSpec(
-            id: "whisper-tiny",
-            displayName: "Tiny (fastest, least accurate)",
-            sizeBytes: 75_000_000,
-            url: URL(string: "https://huggingface.co/Systran/faster-whisper-tiny/resolve/main/model.bin")!
-        ),
-        ModelSpec(
-            id: "whisper-base",
-            displayName: "Base (good balance)",
-            sizeBytes: 150_000_000,
-            url: URL(string: "https://huggingface.co/Systran/faster-whisper-base/resolve/main/model.bin")!
-        ),
-        ModelSpec(
-            id: "whisper-small",
-            displayName: "Small (more accurate)",
-            sizeBytes: 500_000_000,
-            url: URL(string: "https://huggingface.co/Systran/faster-whisper-small/resolve/main/model.bin")!
-        ),
-        ModelSpec(
-            id: "whisper-medium",
-            displayName: "Medium (most accurate, slowest)",
-            sizeBytes: 1_500_000_000,
-            url: URL(string: "https://huggingface.co/Systran/faster-whisper-medium/resolve/main/model.bin")!
-        ),
+        ModelSpec(id: "whisper-tiny", displayName: "Tiny", sizeBytes: 75_000_000, url: URL(string: base + "ggml-tiny.bin")!),
+        ModelSpec(id: "whisper-base", displayName: "Base", sizeBytes: 150_000_000, url: URL(string: base + "ggml-base.bin")!),
+        ModelSpec(id: "whisper-small", displayName: "Small", sizeBytes: 500_000_000, url: URL(string: base + "ggml-small.bin")!),
+        ModelSpec(id: "whisper-medium", displayName: "Medium", sizeBytes: 1_500_000_000, url: URL(string: base + "ggml-medium.bin")!),
+        ModelSpec(id: defaultID, displayName: "Large v3 · accuracy · 1.08 GB", sizeBytes: 1_081_140_203,
+                  url: URL(string: base + "ggml-large-v3-q5_0.bin")!, sha256: "d75795ecff3f83b5faa89d1900604ad8c780abd5739fae406de19f23ecd98ad1"),
+        ModelSpec(id: "whisper-large-v3-turbo-q5_0", displayName: "Large v3 Turbo · faster · 574 MB", sizeBytes: 574_041_195,
+                  url: URL(string: base + "ggml-large-v3-turbo-q5_0.bin")!, sha256: "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2")
     ]
+    public static var selectable: [ModelSpec] { all.filter { $0.sha256 != nil } }
+    public static func spec(id: String) -> ModelSpec? { all.first { $0.id == id } }
+}
 
-    public static func spec(id: String) -> ModelSpec? {
-        all.first { $0.id == id }
-    }
+/// 4-bit weights keep the baseline useful on 8 GB machines. Larger models
+/// require a separate measured profile; do not select one from RAM alone.
+public enum SummaryModelCatalog {
+    public static let defaultID = "qwen3.5-4b-q4_k_m"
+    public static let all = [ModelSpec(
+        id: defaultID, displayName: "Qwen 3.5 4B · 4-bit · 3.01 GB", sizeBytes: 3_013_027_808,
+        url: URL(string: "https://huggingface.co/bartowski/Qwen_Qwen3.5-4B-GGUF/resolve/4168f45a16a1290d65a4ec0fa312ae917a4c15d6/Qwen_Qwen3.5-4B-Q4_K_M.gguf")!,
+        sha256: "13c16f426047e2de38cd075bdade4a7bcbc8c774384876f677740cda65f8a983"
+    )]
+    public static func spec(id: String) -> ModelSpec? { all.first { $0.id == id } }
+    public static let minimumMemoryBytes: UInt64 = 8 * 1_024 * 1_024 * 1_024
+    public static let contextTokens = 8_192
+    public static let transcriptBudget = 10_000
 }
 
 /// A download seam so Core stays pure. The App layer supplies a real one

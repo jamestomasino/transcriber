@@ -32,12 +32,13 @@ public struct URLSessionModelDownloader: ModelDownloader {
 // The single decision point that turns `AppSettings` into a concrete
 // `MeetingProcessor`. This is where the pluggability lives:
 //
+//   .whisper   → downloaded Whisper (default, offline) + heuristic diarizer
 //   .local     → Apple Speech (on-device, private, no key) + heuristic diarizer
 //   .deepgram  → Deepgram Nova (accurate speaker ID, needs a key) + identity diarizer
 //
-// The summarizer is an LLM chosen per settings: **local** (on-device Apple
-// Intelligence — offline, no key), **OpenAI**, or **Anthropic**, so a user can
-// run the whole pipeline locally or in the cloud.
+// The default summarizer is the downloaded local model (.localModel). Apple
+// Intelligence (.local), OpenAI and Anthropic remain explicit alternatives.
+// Constructing a processor does not download or load inference assets.
 //
 // API keys are read lazily from the Keychain through the injected closures, so
 // the Core components stay pure and unit-testable.
@@ -52,6 +53,9 @@ public enum ProcessorFactory {
         let transcriber: any Transcriber
         let diarizer: any Diarizer
         switch settings.transcriptionBackend {
+        case .whisper:
+            transcriber = WhisperTranscriber(modelID: settings.whisperModel, vocabulary: settings.transcriptionVocabulary)
+            diarizer = HeuristicDiarizer()
         case .local:
             transcriber = LocalSpeechTranscriber()
             diarizer = HeuristicDiarizer()
@@ -71,6 +75,8 @@ public enum ProcessorFactory {
     public static func makeSummarizer(settings: AppSettings, http: (any HTTPClient)? = nil) -> any Summarizer {
         let http = http ?? RetryingHTTPClient(inner: URLSessionHTTPClient())
         switch settings.summaryBackend {
+        case .localModel:
+            return DownloadedModelSummarizer(modelID: settings.summaryModel)
         case .local:
             // On-device Apple Intelligence — no key, no network. The `http`
             // client is unused here; the model runs locally.

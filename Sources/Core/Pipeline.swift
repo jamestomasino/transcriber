@@ -65,6 +65,17 @@ public protocol MeetingProcessor: Sendable {
     ) async throws -> ProcessedResult
 }
 
+/// Pipelines can durably checkpoint an opted-in transcript before summarization.
+/// The async acknowledgement prevents a summary failure from losing completed work.
+public protocol TranscriptCheckpointingProcessor: MeetingProcessor {
+    func process(
+        meeting: Meeting,
+        audio: CapturedAudio,
+        report: @Sendable (ProcessingProgress) -> Void,
+        checkpoint: @Sendable ([TranscriptSegment]) async throws -> Void
+    ) async throws -> ProcessedResult
+}
+
 // MARK: - Component seams
 
 /// Turn captured audio into transcript segments (with speaker labels if the
@@ -92,7 +103,7 @@ public protocol Summarizer: Sendable {
 // cloud backend (provider transcriber that already diarizes + LLM summarizer)
 // both fit the same contract.
 
-public struct PipelineProcessor: MeetingProcessor {
+public struct PipelineProcessor: TranscriptCheckpointingProcessor {
     public let transcriber: any Transcriber
     public let diarizer: any Diarizer
     public let summarizer: any Summarizer
@@ -115,15 +126,39 @@ public struct PipelineProcessor: MeetingProcessor {
         audio: CapturedAudio,
         report: @Sendable (ProcessingProgress) -> Void
     ) async throws -> ProcessedResult {
-        report(ProcessingProgress(stage: .transcribing, fraction: 0))
-        let raw = try await transcriber.transcribe(audio: audio, language: language)
+        try await process(meeting: meeting, audio: audio, report: report, checkpoint: { _ in })
+    }
 
-        guard raw.contains(where: { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else {
-            throw LLMError("No speech was recognized. Audio was kept; check the sources and language in Settings, then retry.")
+    public func process(
+        meeting: Meeting,
+        audio: CapturedAudio,
+        report: @Sendable (ProcessingProgress) -> Void,
+        checkpoint: @Sendable ([TranscriptSegment]) async throws -> Void
+    ) async throws -> ProcessedResult {
+        let segments: [TranscriptSegment]
+        if !meeting.transcript.isEmpty {
+            // Retained transcripts are already diarized. Retry only the failed
+            // summary stage rather than repeat a lengthy transcription.
+            segments = meeting.transcript
+        } else {
+            report(ProcessingProgress(stage: .transcribing, fraction: 0))
+            let raw = try await transcriber.transcribe(audio: audio, language: language)
+
+            guard raw.contains(where: { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else {
+                throw LLMError("No speech was recognized. Audio was kept; check the sources and language in Settings, then retry.")
+            }
+            // A recognizer can finish successfully after capturing only a fragment.
+            // Do not turn a few words from a long recording into a destructive success.
+            let wordCount = raw.reduce(0) { $0 + $1.text.split(whereSeparator: { $0.isWhitespace }).count }
+            if meeting.duration >= 15 * 60 && wordCount < 100 {
+                throw LLMError("Very little speech was recognized for this long recording. Audio was kept; check your audio sources and transcription backend in Settings, then retry.")
+            }
+            report(ProcessingProgress(stage: .diarizing, fraction: 0))
+            segments = try await diarizer.diarize(raw)
+
         }
-        report(ProcessingProgress(stage: .diarizing, fraction: 0))
-        let segments = try await diarizer.diarize(raw)
-
+        try Task.checkCancellation()
+        try await checkpoint(segments)
         report(ProcessingProgress(stage: .summarizing, fraction: 0))
         let summary = try await summarizer.summarize(segments: segments, title: meeting.title)
 
@@ -131,6 +166,7 @@ public struct PipelineProcessor: MeetingProcessor {
               summary.overall != "(no summary produced)" else {
             throw LLMError("The model returned no summary. Audio was kept so you can retry.")
         }
+        try Summary.validateDetail(summary, segments: segments)
         report(ProcessingProgress(stage: .summarizing, fraction: 1))
         return ProcessedResult(segments: segments, summary: summary)
     }

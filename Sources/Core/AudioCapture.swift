@@ -17,6 +17,7 @@ import Foundation
 /// source. A source is absent if it was not requested or failed to start.
 public struct CapturedAudio: Equatable, Sendable {
     public static let preparedFileName = "mixed.m4a"
+    public static let speechSectionFileName = "speech-section.caf"
     /// File URLs per source that actually captured something.
     public var fileURLs: [AudioSource: URL]
     public var startOffsets: [AudioSource: TimeInterval]

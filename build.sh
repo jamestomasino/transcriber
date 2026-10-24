@@ -46,6 +46,10 @@ APP_SRC=(
   Sources/App/OnboardingView.swift
   Sources/App/LocalTranscriber.swift
   Sources/App/LocalSummarizer.swift
+  Sources/App/LocalModelAssets.swift
+  Sources/App/WhisperTranscriber.swift
+  Sources/App/LocalSummaryServer.swift
+  Sources/App/LocalModelSetupView.swift
   Sources/App/ProcessorFactory.swift
   Sources/App/Notifications.swift
 )
@@ -93,6 +97,7 @@ build_app_with_sdk() {
   swiftc \
     -O \
     -parse-as-library \
+    -I Sources/CWhisper/include \
     -target "$TARGET" \
     -sdk "$sdk" \
     -module-name "$APP_NAME" \
@@ -137,6 +142,8 @@ cat > "${APP_DIR}/Contents/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
+
+cp Sources/CWhisper/LICENSE "$RES_DIR/Whisper-LICENSE"
 
 echo "==> Writing PkgInfo"
 printf 'APPL????' > "${APP_DIR}/Contents/PkgInfo"
@@ -212,9 +219,9 @@ if [ "$MODE" = "test" ]; then
   echo "==> Running test executable"
   "${BUILD}/tests"
   echo "==> Building + running media checks"
-  swiftc -parse-as-library -target "$TARGET" -sdk "${WORKING_SDK:-$DEFAULT_SDK}" \
+  swiftc -parse-as-library -I Sources/CWhisper/include -target "$TARGET" -sdk "${WORKING_SDK:-$DEFAULT_SDK}" \
     -o "${BUILD}/app-checks" "${CORE_SRC[@]}" \
-    Sources/App/AppStorage.swift Sources/App/AudioPreparation.swift Sources/App/LocalTranscriber.swift Sources/App/SystemAudioTap.swift Validation/AppChecks.swift
+    Sources/App/AppStorage.swift Sources/App/AudioPreparation.swift Sources/App/LocalTranscriber.swift Sources/App/SystemAudioTap.swift Sources/App/LocalModelAssets.swift Sources/App/WhisperTranscriber.swift Sources/App/LocalSummaryServer.swift Validation/AppChecks.swift
   "${BUILD}/app-checks"
   echo
   echo "    Tests: ${BUILD}/tests"

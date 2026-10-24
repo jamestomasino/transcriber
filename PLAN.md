@@ -5,21 +5,22 @@ captures Zoom / Slack / Teams conversations), then turns that recording into a
 **transcript with identified speakers**, writes a **meeting summary**, and keeps
 only the **summary** — deleting the audio and the transcript.
 
-> **Current implementation status — 23 October 2026.** Phases 0–7 are
-> implemented, including first-run setup and permission guidance, microphone
-> selection, both-source transcription with aligned mixing, searchable summary
-> history, live timers, cancellation, durable failure reasons, and retention
-> recovery after an interrupted cleanup. A full review of §§1–18 also corrected
-> fresh-install storage, backup recovery, cloud request/response mismatches,
-> strict offline Speech behavior, and long local summaries. See
-> [docs/PLAN_REVIEW.md](docs/PLAN_REVIEW.md) for findings, improvements, scope
-> decisions, and validation limits. The CLT-only build and SDK fallback remain
-> required. `bash build.sh test` runs Core assertions and real media checks;
-> [Validation/README.md](Validation/README.md) describes the isolated UI and live
-> checks. Live system capture and Apple Intelligence summarization have been
-> exercised. A fully authenticated recording-to-transcript-to-summary run,
-> including live Speech permission or a cloud transcription key, remains an
-> acceptance check; it is not claimed complete by the fake-HTTP tests.
+> **Current standard — 24 October 2026.** Downloaded Whisper large-v3 Q5_0
+> transcription and Qwen 3.5 4B Q4_K_M summaries are the standard path for fresh
+> installs. Weights and inference runtimes are not bundled or fetched on launch
+> or backend selection: download explicitly in Setup/Settings or on first use,
+> then reuse the verified cache offline. Existing saved backend choices remain
+> intact; Apple and cloud providers are explicit alternatives. See §24 and
+> [docs/LOCAL_MODELS.md](docs/LOCAL_MODELS.md) for the authoritative workflow,
+> resource profile and validation limits. Earlier sections preserve design history.
+>
+> Phases 0–7 and the local model pivot are implemented. The CLT-only build and
+> SDK fallback remain required. `bash build.sh test` passes 394 assertions and
+> real media, cache, transport and cleanup checks. Live checks exercised local
+> Whisper pharma terms and a real recording excerpt; the downloaded summarizer
+> recovered a real meeting from its retained transcript. A complete long meeting
+> transcribed and summarized with both downloaded backends remains a separate
+> acceptance check. See [Validation/README.md](Validation/README.md).
 
 This plan is written to be implemented on top of the `timetracker` repo: same
 architecture, same build system, same conventions. Where it differs, the
@@ -406,8 +407,8 @@ Tests use a fake that writes a tiny valid audio file.
 - Tradeoff: audio leaves the machine; per-meeting cost; needs an API key
   (stored in **Keychain**, never in `settings.json`).
 
-### Recommendation
-- **Default backend: cloud (AssemblyAI or Deepgram) for transcribe+diarize,
+### Original recommendation (superseded by §24)
+- **Original default backend: cloud (AssemblyAI or Deepgram) for transcribe+diarize,
   OpenAI/Anthropic for the summary** — it's the most reliable for the
   "identify speakers" requirement and the least code to get right.
 - **Local mode** (Apple Speech + best-effort diarization) as a documented,
@@ -682,11 +683,11 @@ Each phase ends in a **buildable, testable** state (`bash build.sh test`).
 The original sections above preserve the design history. The authoritative
 implementation audit is [docs/PLAN_REVIEW.md](docs/PLAN_REVIEW.md). In particular:
 
-- First-run defaults are local Apple Speech transcription, local Apple
-  Intelligence summaries, language `en`, and `~/Documents/Transcriber` storage.
-  Saved settings and legacy Application Support storage remain unchanged.
-  Local summaries require macOS 26+ with Apple Intelligence enabled; local
-  speaker labeling remains approximate.
+- Current first-run defaults are downloaded Whisper transcription and Qwen
+  local summaries, language `en`, and `~/Documents/Transcriber` storage (see §24).
+  The earlier Apple defaults documented in the original review are alternatives.
+  Saved settings and legacy Application Support storage remain unchanged;
+  local speaker labeling remains approximate.
 - Summary saves precede deletion, and pending cleanup decisions survive a crash.
   Failed cleanup can be retried without repeating provider requests.
 - New recording folders use `yyyyMMdd-HHmm-<meeting-id>` in local start time.
@@ -720,3 +721,156 @@ recording and removed the fixture files. The isolated setup preview launched.
 The live Speech check was skipped for missing authorization; the separate live
 summary check returned `com.apple.SensitiveContentAnalysisML` error 15, so this
 run does not establish full transcription-to-summary acceptance.
+
+## 21. Optional local model fallback — 23 October 2026
+
+**Historical proposal: superseded by §§23–24.** At this point the downloaded
+models were a contingency, with Apple Speech and Apple Intelligence still the
+local defaults. Evaluate their
+quality using a real meeting with audio and transcript retention explicitly
+enabled, comparing the recording, transcript, and resulting notes before
+deciding whether to replace either stage.
+
+- **If transcription loses detail:** evaluate a downloadable local Whisper
+  model through [whisper.cpp](https://github.com/ggml-org/whisper.cpp), replacing
+  Apple Speech behind the existing `Transcriber` seam. Benchmark complete
+  long-meeting coverage, terminology, timestamps, processing time, and memory
+  on the target Mac. Whisper performs speech-to-text; it does not generate
+  meeting summaries or by itself provide reliable speaker identification.
+- **If the transcript is complete but notes lose detail:** evaluate a separate
+  downloadable local language model behind `Summarizer`, replacing Apple
+  Intelligence. Compare concrete findings, priorities, decisions, owners,
+  deadlines, and open questions against the retained transcript. Check both
+  omissions and invented details, including details from the middle and end.
+- **If both stages fall short:** replace them independently. A Whisper upgrade
+  alone does not address poor summarization. Select models and runtimes only
+  after measuring quality and resource use; no model choice is committed here.
+
+Any implementation should offer an explicit model download with size and
+progress, reuse or extend the existing model cache with integrity checks and
+retryable failures, and support offline processing after download. Keep model
+assets separate from meeting artifacts. Audio, temporary sections, prepared
+mixes, and transcripts must remain under managed retention; opting into a
+different model must not change the default deletion policy. Preserve the
+CLT-only build, pure Core layer, and injected test seams. Add deterministic
+download/pipeline/cleanup checks and validate model quality on retained real
+recordings before making a new backend the default.
+
+## 22. Recovery after a local summary failure — 23 October 2026
+
+A real meeting reached Apple Intelligence and failed with
+`com.apple.SensitiveContentAnalysisML error 15`; the original recordings remained
+available. That error alone does not establish whether the content was rejected
+or a model service failed. The app previously attached the transcript only after
+summary success, so opting into transcript retention did not preserve completed
+transcription when the summarizer failed.
+
+`TranscriptCheckpointingProcessor` now lets the pipeline await a durable
+transcript save before invoking the summarizer. The view model writes this
+checkpoint only when transcript retention is enabled. A failed meeting with a
+retained transcript resumes at summarization on Retry, including after relaunch.
+Original audio remains available on failure, and successful retention still
+follows the existing policy. Apple Intelligence failures now identify the summary
+stage and give retry/backend guidance rather than only exposing a numeric code.
+
+For explicit recovery automation, launching the app with
+`--retry-meeting <meeting UUID>` invokes the same guarded retry path as the UI.
+Ordinary launches do not automatically retry failed meetings.
+
+Validation: 386 assertions and the real-media checks pass. New checks inspect a
+fresh store from inside the summarizer to verify that an opted-in transcript is
+already durable, verify that the default does not persist a transcript, and
+exercise summary-only retry after a simulated relaunch without retranscription.
+
+The recovered transcript exposed a separate transcription defect: the legacy
+URL recognizer returned closing fragments of each audio block. A live fixture
+with three sentences separated by silence also returned only its last sentence,
+even with partial callbacks and the multi-utterance delegate. Local transcription
+on macOS 26+ now uses `SpeechAnalyzer` with `SpeechTranscriber` to consume the
+entire file and collect finalized results. This uses installed on-device language
+assets; it does not send audio to a service or silently download another model.
+Older systems retain the sectioned legacy path, now accumulating hypotheses and
+utterances through the full task lifecycle. Pure tests cover revisions, repeated
+snapshots, timestamp jitter, and preserving earlier utterances.
+
+An explicit `--retranscribe-meeting <meeting UUID>` recovery invocation ignores
+an incomplete retained transcript for processing, while leaving that checkpoint
+on disk until a new transcription is successfully saved. Normal Retry continues
+to reuse retained transcripts. `--validate-local-speech` runs a synthetic
+multi-utterance check inside the app's existing authorization without creating a
+fixture meeting or processing a real recording.
+
+Live validation of the modern path preserved all three task details and deadlines
+in the separated-sentence fixture. Reprocessing the retained 37-minute recording
+then recovered approximately 6,010 words versus 1,273 from the legacy recognizer,
+with coverage through the meeting's closing speech. This verifies the substantial
+transcription repair; the independent Apple Intelligence summary failure remains
+a separate failure: the subsequent real summary attempt again returned a generic
+`FoundationModels.LanguageModelError` code -1, with the fuller transcript safely
+retained. A passing synthetic summary fixture does not establish reliability on
+real meetings. At that point the independent local summarizer in §21 was still
+a contingency; §23 records its implementation and §24 makes it standard.
+
+## 23. Downloaded local model pivot — 23 October 2026
+
+The optional fallback in §21 is now authorized and implemented. Fresh installs
+select Whisper large-v3 Q5_0 for transcription and Qwen 3.5 4B Q4_K_M for
+summarization. Explicit saved backend choices are preserved; the user's selected
+pivot is applied through normal settings. Large-v3 Turbo Q5_0 is available as a
+smaller transcription option. A short vocabulary field conditions Whisper on
+relevant pharma terms without claiming a domain-specific fine-tune.
+
+The 4B summary profile targets recent Macs with at least 8 GB memory; 16 GB gives
+additional application headroom. Context, generation and prefill batches are
+bounded. Models from concurrent meetings run in a serial inference queue and
+release their weights between transcription and summary. A larger summary model
+is not auto-selected from physical memory alone. See [the model profile and
+measurements](docs/LOCAL_MODELS.md) for exact asset sizes and limits.
+
+The app downloads and caches pinned upstream runtimes and model revisions with
+exact-size and SHA-256 validation, atomic cache replacement, progress and
+URLSession resume data. Runtime source compilation is not introduced: the CLT
+build still invokes swiftc, importing pinned C declarations and dynamically
+loading the verified Whisper framework. The summary subprocess uses a private
+Unix socket, schema-constrained JSON, no enabled tools or web UI, no prompt logs,
+and an EOF lifetime guard. Audio is decoded into bounded PCM buffers without a
+new on-disk WAV; all existing summary, checkpoint and retention rules apply.
+
+Settings and onboarding expose downloads and sizes. Failed meetings distinguish
+Retry summary from Transcribe again. Isolated UI fixtures disable downloads;
+asset and transport tests inject temporary roots and fake downloaders. Live
+checks cover synthetic pharma terms and a real retained meeting excerpt; these
+are separate from the deterministic harness and do not establish clinical-domain
+accuracy across all meetings. Apple Speech and Apple Intelligence remain explicit
+alternatives, alongside the existing cloud providers.
+
+Acceptance: the 394-assertion harness and real-media checks pass, including model
+integrity repair, shared-download cancellation, serialized inference cancellation,
+private HTTP socket framing, and child cleanup on EOF. Whisper Large v3 retained
+three synthetic pharma terms/deadlines and transcribed a real recording excerpt.
+The local 4B summarizer passed the grounded fixture and recovered the real meeting
+summary with 41 key points and 10 actions from its retained transcript. Runtime
+idle prompt RAM caching and context checkpoints are disabled; the final cached
+fixture completed in 52 seconds on the 8 GB A18 Pro machine. The app uses the new
+local backends and preserves the user's opted-in audio/transcript retention.
+
+## 24. Standard local workflow — 24 October 2026
+
+The downloaded model path is the product standard going forward, not a backup:
+Whisper large-v3 Q5_0 transcription, then Qwen 3.5 4B Q4_K_M summarization. Fresh
+settings already select these backends. Preserve explicit saved selections;
+Apple Speech, Apple Intelligence and cloud providers remain optional alternatives.
+
+Distribute the application without model weights or inference runtime binaries.
+Fetch selected assets only through an explicit Setup/Settings download or the
+first processing task that needs them. App launch and backend selection alone
+do not initiate downloads. Verify pinned revisions, sizes and SHA-256 hashes,
+cache separately from meeting artifacts, and reuse the cache offline. Keep the
+CLT-only build independent of downloads and inference runtime compilation.
+
+Run one inference job at a time, process all meeting sections within bounded
+memory, and preserve the durable-summary-before-deletion contract. The standard
+8 GB minimum / 16 GB headroom profile, measured limits, terminology hints,
+private helper lifecycle and acceptance coverage are maintained in
+[docs/LOCAL_MODELS.md](docs/LOCAL_MODELS.md). New changes should follow that
+reference and AGENTS.md rather than the superseded default recommendations.

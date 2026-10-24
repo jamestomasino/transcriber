@@ -281,10 +281,12 @@ public final class TranscriberViewModel: ObservableObject {
 
     /// Run the pipeline for a specific meeting. Awaitable so tests drive it.
     @discardableResult
-    public func runPipeline(for id: UUID) async -> Bool {
-        guard let meeting = engine.meeting(id: id),
+    public func runPipeline(for id: UUID, reuseTranscript: Bool = true) async -> Bool {
+        guard var meeting = engine.meeting(id: id),
               meeting.status == .processing || meeting.status == .failed else { return false }
         guard !processingIDs.contains(id) else { return false }
+        // Keep the old checkpoint on disk until a fresh transcription succeeds.
+        if !reuseTranscript { meeting.transcript = [] }
         processingIDs.insert(id)
         defer {
             processingIDs.remove(id)
@@ -302,18 +304,24 @@ public final class TranscriberViewModel: ObservableObject {
             // falling back to the fixed processor otherwise.
             let active: any MeetingProcessor =
                 processorFactory?(settings) ?? processor
+            let report: @Sendable (ProcessingProgress) -> Void = { [weak self] p in
+                Task { @MainActor in
+                    guard let self, self.processingIDs.contains(id) else { return }
+                    self.processingProgress = p
+                    self.progressByMeeting[id] = p
+                }
+            }
             let task = Task {
-                try await active.process(
-                    meeting: meeting,
-                    audio: CapturedAudio(fileURLs: meeting.audioFileURLs, startOffsets: meeting.audioStartOffsets),
-                    report: { [weak self] p in
-                        Task { @MainActor in
-                            guard let self, self.processingIDs.contains(id) else { return }
-                            self.processingProgress = p
-                            self.progressByMeeting[id] = p
+                let audio = CapturedAudio(fileURLs: meeting.audioFileURLs, startOffsets: meeting.audioStartOffsets)
+                if let checkpointing = active as? any TranscriptCheckpointingProcessor {
+                    return try await checkpointing.process(
+                        meeting: meeting, audio: audio, report: report,
+                        checkpoint: { [weak self] segments in
+                            try await self?.retainTranscriptCheckpoint(id: id, segments: segments)
                         }
-                    }
-                )
+                    )
+                }
+                return try await active.process(meeting: meeting, audio: audio, report: report)
             }
             processingTasks[id] = task
             let result = try await withTaskCancellationHandler {
@@ -377,6 +385,16 @@ public final class TranscriberViewModel: ObservableObject {
             // the reason when we have one.
             self.notifyTerminal(id: id, errorDescription: processingError)
             return false
+        }
+    }
+
+    private func retainTranscriptCheckpoint(id: UUID, segments: [TranscriptSegment]) throws {
+        guard settings.keepTranscriptAfterSummary else { return }
+        guard processingIDs.contains(id), engine.meeting(id: id) != nil else { throw CancellationError() }
+        engine.setTranscript(id: id, segments: segments)
+        meetings = engine.recent
+        guard persist() else {
+            throw LLMError("The transcript could not be saved. Audio was kept; check your data folder and retry.")
         }
     }
 
@@ -446,23 +464,28 @@ public final class TranscriberViewModel: ObservableObject {
 
     /// Retry a failed meeting's pipeline.
     @discardableResult
-    public func retry(id: UUID) async -> Bool {
+    public func retry(id: UUID, reuseTranscript: Bool = true) async -> Bool {
         guard let m = engine.meeting(id: id), m.status == .failed else { return false }
         if m.summary != nil && !m.pendingArtifactDeletion.isEmpty { return finishPendingRetention(m) }
         engine.retry(id: id)
         self.meetings = engine.recent
         self.activeMeeting = engine.active
         self.persist()
-        return await runPipeline(for: id)
+        return await runPipeline(for: id, reuseTranscript: reuseTranscript)
     }
 
     // MARK: - Settings
 
     /// Update a setting and persist it.
     public func updateSettings(_ mutate: (inout AppSettings) -> Void) {
+        let previousTranscription = settings.transcriptionBackend
         let previousBackend = settings.summaryBackend
         let previousModel = settings.summaryModel
         mutate(&settings)
+        if previousTranscription != settings.transcriptionBackend && settings.transcriptionBackend == .whisper,
+           !WhisperCatalog.selectable.contains(where: { $0.id == settings.whisperModel }) {
+            settings.whisperModel = WhisperCatalog.defaultID
+        }
         if previousBackend != settings.summaryBackend && previousModel == settings.summaryModel {
             settings.summaryModel = AppSettings.defaultSummaryModel(for: settings.summaryBackend)
         }

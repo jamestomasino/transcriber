@@ -7,12 +7,17 @@ write backing files.
 
 The media checks create two tracks with sound in different halves, verify that
 both survive mixing, check temporary-file cleanup after success and failure,
-and verify compression for a single cloud-bound track.
+and verify compression for a single cloud-bound track. A 125-second audio fixture
+also verifies full coverage by local Speech sections, absolute timestamps, and
+transient-file cleanup after success, failure, and cancellation, without requiring
+Speech permission. The detailed live summary check verifies action owners, deadlines,
+priorities and a numeric finding across multiple transcript sections.
 
 Optional live checks:
 
 ```bash
 bash Validation/run.sh live
+bash Validation/run.sh live --detailed-summary # multi-section audit detail and action coverage
 ```
 
 This creates a spoken fixture with macOS `say`, plays it through `afplay`, and
@@ -65,3 +70,28 @@ microphone and system audio, Speech permission or a Deepgram key, and a usable
 summary backend. Verify the resulting summary, retry/cancel behavior, removal of
 raw artifacts, and persistence after relaunch. An authenticated cloud run is
 separate from the deterministic fake-HTTP tests.
+
+To check multiple utterances with the normal app's existing Speech permission,
+close the normal app and launch `open build/Transcriber.app --args
+--validate-local-speech`. This reopens the normal app and its history, then
+transcribes a synthetic recording with three sentences separated by silence;
+it does not create a fixture meeting or process a real recording. The fixture
+audio stays in an isolated temporary folder and is removed on completion.
+`transcriber-hosted-speech-check.json` in the system temporary directory records
+whether the first, middle, and last markers and deadlines survived. On macOS
+26+, this also checks the installed-model `SpeechAnalyzer` file path. A passing
+short fixture still does not establish complete coverage of a real long meeting.
+
+Downloaded local model validation is opt-in:
+
+```bash
+bash Validation/run.sh models --whisper-only
+bash Validation/run.sh models --summary-only
+```
+
+These checks download missing pinned public weights, then process synthetic
+pharma speech and notes. They report term/action coverage, timings and host peak
+memory without logging transcripts. `--meeting <UUID> --whisper-only` explicitly
+checks a real retained recording excerpt; its transient audio stays in the
+managed recording directory and is removed. Model download buttons are disabled
+in the isolated UI preview. See [the model profile](../docs/LOCAL_MODELS.md).

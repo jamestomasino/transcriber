@@ -30,9 +30,13 @@ The summary is the only thing that sticks around. That's the point.
   identify different people.
 - **A structured summary.** Overall, key points, decisions, and action items —
   not a wall of text.
-- **Local by default.** Transcription (Apple Speech) and summarization (Apple
-  Intelligence) start with Local selected to keep the whole pipeline on your
-  Mac. No account or API key. The initial language code is `en`.
+- **Local by default.** Fresh installs use Whisper Large v3 for transcription
+  and a quantized Qwen 3.5 4B model for summaries. Download about 4.2 GB once,
+  then process meetings offline without an account or API key. Saved backend
+  choices are preserved. The initial language code is `en`.
+- **Terminology hints.** Add a short list of drug names, trial identifiers,
+  company names or acronyms to help Whisper recognize specialist conversations.
+  Large v3 prioritizes accuracy; Turbo offers a smaller, faster option.
 - **Cloud when you want it.** Swap in Deepgram (best speaker ID) or
   OpenAI / Anthropic (stronger summaries) with a key — or mix and match per
   stage.
@@ -51,17 +55,15 @@ The summary is the only thing that sticks around. That's the point.
 - **System Audio Recording access** — needed to capture other apps on macOS 14.2+.
   Use Allow in Setup and permissions; no screen or video is captured. macOS
   14.0–14.1 uses Screen Recording access instead. Neither is needed for mic-only recording.
-- **Speech Recognition** (for on-device transcription) —
-  System Settings → Privacy & Security → Speech Recognition.
-- **A summarization backend** — one of:
-  - **Local** (on-device Apple Intelligence): nothing else required, **but**
-    needs **macOS 26+** with Apple Intelligence enabled, or
-  - **OpenAI** or **Anthropic**: an API key (stored in your macOS Keychain).
+- **8 GB memory or more** for the downloaded local summary model; 16 GB gives
+  more headroom for other apps. Model downloads need about 4.2 GB of storage.
+- **Speech Recognition permission** is needed only when selecting Apple Speech.
+  Whisper does not use Apple's Speech service.
+- **Alternative summary backends:** Apple Intelligence needs macOS 26+ and its
+  system models enabled. OpenAI and Anthropic require a Keychain-stored API key.
 
-> First startup selects **Local** for both transcription and summaries. Local
-> summaries need macOS 26+ with Apple Intelligence enabled. On older systems,
-> choose a cloud summary backend and add its API key. See [Backends](#backends)
-> and [Getting started](#getting-started).
+See [local models](docs/LOCAL_MODELS.md) for pinned assets, resource limits,
+terminology hints and validation coverage.
 
 ---
 
@@ -77,11 +79,11 @@ open build/Transcriber.app
 
 Then, in the app:
 
-1. **Pick a summary backend** in Settings (⌘,):
-   - **Local** — fully offline. Choose this if you're on macOS 26+ and don't
-     want to sign up for anything. No key, no network.
-   - **OpenAI** or **Anthropic** — enter your API key under *Summary*. It's
-     saved to the macOS Keychain, never written to a file.
+1. **Download the selected local models** in Setup or Settings (⌘,). The default
+   Whisper and 4B summary models need about 4.2 GB including runtimes. Downloads
+   show progress, validate checksums, and can resume after interruptions. Missing
+   models also download on first use. Apple and cloud alternatives remain in the
+   backend pickers; cloud API keys are stored in Keychain.
 2. **Start a meeting.** Give it a name (optional) and hit **Start**. A level
    meter and a permission/capture status card show what's being recorded.
 3. **Stop when you're done.** Transcription and summarization run automatically
@@ -89,6 +91,12 @@ Then, in the app:
 4. **Read the summary.** A notification tells you it's ready; select the meeting
    to open its **detail pane** with the full structured summary, and **Retry**,
    **Copy**, or **Delete** it.
+
+Model weights and inference runtimes are **not included in the app bundle**.
+Launching the app or selecting a local backend does not start a download. Assets
+are fetched when you request them in Setup/Settings or first process a meeting
+with the selected backend, then reused from the local cache. This is the standard
+workflow; Apple and cloud providers are optional alternatives.
 
 That's the whole loop. Everything else is optional tuning.
 
@@ -100,16 +108,18 @@ Transcription and summarization are **independent** — pick any combination.
 
 | Stage        | Option        | Runs where      | Needs a key? | Notes                                   |
 | ------------ | ------------- | --------------- | ------------ | --------------------------------------- |
-| **Transcribe** | **Local**   | On your Mac     | No           | Apple Speech. Private, offline. Default. |
-| **Transcribe** | **Deepgram**| Cloud          | Yes (Deepgram) | Nova with native diarization — the most accurate speaker IDs. |
-| **Summarize**  | **Local**   | On your Mac     | No           | Apple Intelligence. Offline. Default. **macOS 26+.** |
-| **Summarize**  | **OpenAI**  | Cloud           | Yes (OpenAI) | Any chat model (default: `gpt-4o-mini`). |
-| **Summarize**  | **Anthropic** | Cloud          | Yes (Anthropic) | Any Claude model.                        |
+| **Transcribe** | **Whisper** | On your Mac | No | Default: Large v3 Q5. Download once. Approximate speaker labels. |
+| **Transcribe** | **Apple Speech** | On your Mac | No | Alternative; modern SpeechAnalyzer on macOS 26+. |
+| **Transcribe** | **Deepgram** | Cloud | Yes | Nova with native speaker diarization. |
+| **Summarize** | **Downloaded local model** | On your Mac | No | Default: Qwen 3.5 4B Q4. Bounded context, complete meeting sections. |
+| **Summarize** | **Apple Intelligence** | On your Mac | No | Alternative, macOS 26+. |
+| **Summarize** | **OpenAI** | Cloud | Yes | Default: `gpt-4o-mini`. |
+| **Summarize** | **Anthropic** | Cloud | Yes | Default: `claude-haiku-4-5`. |
 
-**Fully local (recommended for privacy):** Local transcriber + Local summarizer
-= the entire app runs on your machine. No account, no key, no network. On
-macOS 26+ this is the best default; on older systems the Local summarizer is
-unavailable, so use OpenAI or Anthropic for the summary.
+**Fully local:** Whisper + the downloaded local summarizer need network access
+only for public model/runtime downloads. Audio and transcript inference stays on
+the Mac. The summary helper uses a private Unix socket and exits after each job.
+Models from concurrent meetings are queued to keep memory use bounded.
 
 **Best quality:** Deepgram transcriber + your preferred LLM for the summary.
 
@@ -140,7 +150,8 @@ rather than echoing the secret back.
   Existing installations using Application Support keep that location until
   you choose another folder or Reset. Preferences stay in Application Support.
 - **Cloud backends send audio / transcript to that provider** (Deepgram, OpenAI,
-  or Anthropic) to do their job. Local backends send nothing anywhere.
+  or Anthropic) to do their job. Downloaded local backends request only public
+  model/runtime assets; they never upload meeting audio or transcripts.
 
 ---
 
@@ -154,8 +165,8 @@ summary providers selects a compatible model; you can then enter a custom model.
 | -------------- | ----------------------------------------------------------------------- |
 | **Audio**      | Capture microphone / system audio; microphone device picker.          |
 | **Storage**    | Keep transcript / keep audio after summary; **Data location** picker.  |
-| **Transcription** | Backend (Local / Deepgram), language code, and the Deepgram key.     |
-| **Summary**    | Backend (Local / OpenAI / Anthropic), model, and the provider key.     |
+| **Transcription** | Backend, Whisper size, terminology hints, language, and Deepgram key.     |
+| **Summary**    | Downloaded local, Apple or cloud backend; model and provider key.     |
 | **General**    | Show toasts; notify when a summary is ready.                           |
 
 ---
@@ -163,9 +174,11 @@ summary providers selects a compatible model; you can then enter a custom model.
 ## Troubleshooting
 
 **"I stopped the meeting but there's no summary."**
-You likely have the OpenAI/Anthropic summarizer selected without a key. Add the
-key in Settings, or switch the summary backend to **Local** (macOS 26+) and
-retry the meeting from its detail pane.
+Read the saved failure reason in the meeting detail. Download the selected
+models in Settings if needed, or configure the chosen cloud provider's key.
+If Apple Intelligence fails, select the downloaded local summary model and
+choose **Retry summary**. An opted-in transcript is saved before summarization,
+so a summary failure does not discard completed transcription.
 
 **"It captured my voice but not the other side."**
 Open **Setup and permissions → System Audio Recording → Allow**. On macOS
@@ -188,7 +201,9 @@ On older systems, use OpenAI or Anthropic for the summary (transcription can
 still be fully local).
 
 **"A meeting shows as failed."**
-Open it and hit **Retry** — it re-runs with your current backend and key.
+Open it and hit **Retry summary** to reuse a saved transcript, or **Transcribe
+again** to run your selected speech backend on the retained recording. Meetings
+without a saved transcript offer **Retry** for the whole pipeline.
 Transient network and rate-limit failures are retried automatically; a persistent
 one (e.g. a bad key) shows its reason, including after relaunch. You can cancel
 processing without deleting the source audio. Cleanup retries reuse a saved
@@ -229,13 +244,15 @@ Sources/Core/   Pure, AppKit-free core (Foundation only): the model, engine,
                 pluggable backends. Fully unit-testable.
 Sources/App/    The SwiftUI/AppKit shell (window, menu bar, detail pane,
                 settings) plus the platform pieces Core stays pure of: real
-                audio capture (Core Audio taps, with a ScreenCaptureKit fallback), on-device Speech,
-                on-device summarization (FoundationModels), URLSession + retry,
-                Keychain-backed keys, and notifications.
+                audio capture (Core Audio taps, with a ScreenCaptureKit fallback),
+                Whisper, the private local summary runtime, verified asset downloads,
+                optional Apple/cloud processing, Keychain, and notifications.
+Sources/CWhisper/ Pinned upstream C ABI declarations and license; no model weights
+                or compiled inference runtime.
 Tests/          Custom assertion-based test harness (no XCTest).
 build.sh        swiftc-only build (app + tests), with SDK fallback.
 PLAN.md         Full design, architecture, roadmap, and open decisions.
-docs/           Distribution runbook (signing, notarization, CI).
+docs/           Standard local model profile, validation and distribution runbooks.
 ```
 
 **Design principle:** the tricky logic (retention, retry, summarization

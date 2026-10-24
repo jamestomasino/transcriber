@@ -61,6 +61,25 @@ public extension TranscriptSegment {
     }
 }
 
+/// Accumulate recognition snapshots whose timestamps are relative to the same
+/// audio request. A recognizer can revise the current utterance or start a new
+/// one; the final callback is not necessarily a transcript of the entire file.
+public struct TranscriptAccumulator: Sendable {
+    public private(set) var words: [TranscriptSegment] = []
+    private var snapshotStart: TimeInterval?
+    public init() {}
+
+    public mutating func update(_ snapshot: [TranscriptSegment]) {
+        let ordered = snapshot.sorted { $0.startOffset < $1.startOffset }
+        guard let first = ordered.first else { return }
+        // Partial hypotheses can shift their first word's timestamp slightly.
+        // Treat nearby starts as revisions, preventing duplicated initial words.
+        let cutoff = snapshotStart.map { abs($0 - first.startOffset) < 0.25 ? min($0, first.startOffset) : first.startOffset } ?? first.startOffset
+        words = words.filter { $0.startOffset < cutoff && $0.endOffset <= cutoff } + ordered
+        snapshotStart = cutoff
+    }
+}
+
 /// The structured summary of a meeting — the only artifact we keep by default.
 public struct MeetingSummary: Codable, Equatable, Sendable {
     public var overall: String

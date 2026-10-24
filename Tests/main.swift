@@ -634,7 +634,7 @@ do {
 
     // Keep original transcript + audio; the derived mix is always deleted.
     let keepAll = RetentionPolicy(settings: AppSettings(keepTranscriptAfterSummary: true, keepAudioAfterSummary: true))
-    check(keepAll.artifactsToDelete(for: meeting) == [dir.appendingPathComponent(CapturedAudio.preparedFileName)], "keep-all retains originals but deletes the transient mix")
+    check(Set(keepAll.artifactsToDelete(for: meeting)) == Set([dir.appendingPathComponent(CapturedAudio.preparedFileName), dir.appendingPathComponent(CapturedAudio.speechSectionFileName)]), "keep-all retains originals but deletes transient mix and speech section")
     check(keepAll.keepTranscript && keepAll.keepAudio, "keep-all flags are set")
 } catch {
     check(false, "retention: \(error)")
@@ -658,7 +658,7 @@ do {
     let modelsDir = FileManager.default.temporaryDirectory.appendingPathComponent("transcriber-models-\(UUID().uuidString)", isDirectory: true)
     ModelsDirectory.baseDirectory = { modelsDir }
     let spec = WhisperCatalog.spec(id: "whisper-base")!
-    check(WhisperCatalog.all.count == 4, "catalog lists 4 model sizes")
+    check(WhisperCatalog.all.count == 6, "catalog includes large accuracy and turbo models")
     check(spec.sizeBytes > 0, "catalog spec has a size")
 
     let dl = FakeDownloader()
@@ -701,11 +701,11 @@ try? FileManager.default.removeItem(at: FileManager.default.temporaryDirectory.a
 section("settings: defaults + lenient decode + in-memory persistence")
 do {
     let def = AppSettings()
-    check(def.transcriptionBackend == .local, "default backend is local (private)")
+    check(def.transcriptionBackend == .whisper, "default backend is downloaded Whisper (private)")
     check(def.keepTranscriptAfterSummary == false, "default: transcript not kept")
     check(def.keepAudioAfterSummary == false, "default: audio not kept")
-    check(def.summaryBackend == .local, "default summary backend is local")
-    check(def.summaryModel.isEmpty, "local summary uses the on-device model")
+    check(def.summaryBackend == .localModel, "default summary backend is a downloaded local model")
+    check(def.summaryModel == SummaryModelCatalog.defaultID, "local summary uses the bounded 4B model")
     check(def.language == "en", "default language is English")
     check(def.storageDirectory == StorageDirectory.defaultDirectory, "new settings select Documents storage")
     let fresh = SettingsStore(url: suiteRoot.appendingPathComponent("first-run/settings.json")).load()
@@ -716,7 +716,7 @@ do {
     check(try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(def)) == def,
           "new defaults survive settings serialization")
     check(AppSettings(summaryBackend: .openai).summaryModel == "gpt-4o-mini", "explicit cloud backend selects its compatible model")
-    check(def.whisperModel == "whisper-base", "default whisper model is base")
+    check(def.whisperModel == WhisperCatalog.defaultID, "default Whisper model prioritizes accuracy")
 
     // Round-trip through the in-memory store (no real file touched).
     let store = SettingsStore.inMemory()
@@ -813,6 +813,30 @@ do {
 } catch {
     check(false, "llm: \(error)")
 }
+
+section("downloaded local model contracts and legacy settings")
+do {
+    check(WhisperCatalog.selectable.allSatisfy { $0.sha256?.count == 64 && $0.url.path.contains("5359861") }, "Whisper production models pin a revision and SHA256")
+    check(SummaryModelCatalog.all.allSatisfy { $0.sha256?.count == 64 }, "summary production model has a pinned checksum")
+    check(SummaryModelCatalog.contextTokens == 8192 && SummaryModelCatalog.minimumMemoryBytes == 8 * 1024 * 1024 * 1024,
+          "local summary profile bounds context and minimum memory")
+    let savedApple = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"transcriptionBackend":"local","summaryBackend":"local"}"#.utf8))
+    check(savedApple.transcriptionBackend == .local && savedApple.summaryBackend == .local && savedApple.summaryModel.isEmpty,
+          "saved Apple choices remain usable after the local-model pivot")
+    let configured = AppSettings(transcriptionVocabulary: "pembrolizumab, pharmacokinetics, FDA")
+    let roundTrip = try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(configured))
+    check(roundTrip == configured, "new local choices and pharmaceutical vocabulary survive serialization")
+    let fake = FakeHTTP(status: 200, body: Data(#"{"choices":[{"finish_reason":"stop","message":{"content":"{\"overall\":\"Audit findings\",\"key_points\":[\"Priority P0\"],\"decisions\":[],\"action_items\":[\"Alex: repair redirects Friday\"]}"}}]}"#.utf8))
+    let result = try await LocalJSONSummarizer(model: SummaryModelCatalog.defaultID, http: fake)
+        .summarize(segments: [TranscriptSegment(speaker: "Alex", text: "Repair redirects Friday; P0.")], title: "Audit")
+    check(result.actionItems == ["Alex: repair redirects Friday"] && result.model == SummaryModelCatalog.defaultID,
+          "local JSON endpoint returns structured actions with model provenance")
+    let request = try JSONSerialization.jsonObject(with: fake.lastRequest!.body!) as! [String: Any]
+    check(request["response_format"] != nil && (request["chat_template_kwargs"] as? [String: Bool])?["enable_thinking"] == false,
+          "local endpoint constrains the JSON schema and disables hidden reasoning")
+    check(fake.lastRequest!.headers["Authorization"] == nil && request["cache_prompt"] as? Bool == false,
+          "private local endpoint uses no provider key or persistent prompt cache")
+} catch { check(false, "local model contracts: \(error)") }
 
 // MARK: - Phase 7: long-recording transcript cap (pure)
 section("long recording: transcript cap keeps the LLM prompt bounded")
@@ -1074,7 +1098,7 @@ do {
         settingsStore: store
     )
 
-    check(vm.settings.transcriptionBackend == .local, "default backend is local")
+    check(vm.settings.transcriptionBackend == .whisper, "default backend is Whisper")
     vm.updateSettings { $0.transcriptionBackend = .deepgram }
     vm.updateSettings { $0.summaryBackend = .anthropic }
     vm.updateSettings { $0.keepAudioAfterSummary = true }
@@ -1860,6 +1884,125 @@ do {
         check(error.message.contains("No speech"), "empty transcription gives a retryable explanation")
     }
 } catch { check(false, "silent pipeline: \(error)") }
+
+section("speech snapshots preserve earlier utterances and accept corrections")
+do {
+    func word(_ text: String, _ start: Double, _ end: Double) -> TranscriptSegment {
+        TranscriptSegment(speaker: "S1", text: text, startOffset: start, endOffset: end)
+    }
+    var transcript = TranscriptAccumulator()
+    transcript.update([word("Audit", 0, 1), word("plans", 1, 2)])
+    transcript.update([word("Audit", 0, 1), word("priorities", 1, 2), word("first.", 2, 3)])
+    check(transcript.words.map(\.text) == ["Audit", "priorities", "first."], "revised partial snapshots replace previous wording without duplication")
+    transcript.update([word("Alex", 20, 21), word("will", 21, 22), word("fix", 22, 23)])
+    transcript.update([word("Alex", 20, 21), word("will", 21, 22), word("fix", 22, 23), word("redirects.", 23, 24)])
+    transcript.update([word("Goodbye.", 48, 49)])
+    check(transcript.words.map(\.text) == ["Audit", "priorities", "first.", "Alex", "will", "fix", "redirects.", "Goodbye."],
+          "a final utterance near the end of a section preserves all earlier speech")
+    let previous = transcript.words
+    transcript.update([])
+    check(transcript.words == previous, "an empty recognition callback cannot erase preceding utterances")
+    var jitter = TranscriptAccumulator()
+    jitter.update([word("Alex", 0.01, 0.01)])
+    jitter.update([word("Alex", 0.03, 0.5), word("agreed.", 0.5, 1)])
+    check(jitter.words.map(\.text) == ["Alex", "agreed."], "small timestamp corrections do not duplicate words from partial snapshots")
+    let utterances = TranscriptSegment.utterances(from: transcript.words)
+    check(utterances.first?.startOffset == 0 && utterances.last?.endOffset == 49,
+          "accumulated speech retains the whole request timeline")
+}
+
+section("summary failure checkpoints opted-in transcripts and resumes after relaunch")
+do {
+    final class CountingTranscriber: Transcriber, @unchecked Sendable {
+        var calls = 0
+        func transcribe(audio: CapturedAudio, language: String) async throws -> [TranscriptSegment] {
+            calls += 1
+            return [TranscriptSegment(speaker: "Alex", text: "Alex will fix redirects by Friday.")]
+        }
+    }
+    final class CheckpointSummary: Summarizer, @unchecked Sendable {
+        let url: URL
+        var shouldFail = true
+        var expectCheckpoint = true
+        init(url: URL) { self.url = url }
+        func summarize(segments: [TranscriptSegment], title: String) async throws -> MeetingSummary {
+            let stored = MeetingStore(url: url).load().first
+            check((stored?.transcript == segments) == expectCheckpoint,
+                  "transcript retention preference is durable before the summary request")
+            if shouldFail { throw LLMError("Injected Apple Intelligence failure") }
+            return MeetingSummary(overall: "Repair redirects.", actionItems: ["Alex: fix redirects by Friday."])
+        }
+    }
+    for keepTranscript in [false, true] {
+        let url = suiteRoot.appendingPathComponent("checkpoint-\(keepTranscript)/meetings.json")
+        let transcriber = CountingTranscriber()
+        let summarizer = CheckpointSummary(url: url)
+        summarizer.expectCheckpoint = keepTranscript
+        let settings = AppSettings(keepTranscriptAfterSummary: keepTranscript)
+        let pipeline = PipelineProcessor(transcriber: transcriber, diarizer: IdentityDiarizer(), summarizer: summarizer)
+        let vm = TranscriberViewModel(capture: RecordingAudioCapture(directory: suiteRecordings), processor: pipeline,
+                                     settings: settings, settingsStore: .inMemory(), meetingStore: MeetingStore(url: url))
+        let m = await vm.startAsync(title: "Checkpoint")
+        await vm.stopAsync()
+        let failed = MeetingStore(url: url).load().first!
+        check(failed.status == .failed && failed.transcript.isEmpty != keepTranscript,
+              "summary failure preserves transcript only when opted in")
+        check(!failed.audioFileURLs.isEmpty && failed.audioFileURLs.values.allSatisfy { FileManager.default.fileExists(atPath: $0.path) },
+              "summary failure preserves original audio")
+        if keepTranscript {
+            summarizer.shouldFail = false
+            let reloaded = TranscriberViewModel(capture: RecordingAudioCapture(directory: suiteRecordings), processor: pipeline,
+                                               settings: settings, settingsStore: .inMemory(), meetingStore: MeetingStore(url: url))
+            let succeeded = await reloaded.retry(id: m.id)
+            check(succeeded && transcriber.calls == 1, "summary retry after relaunch reuses the durable transcript")
+            check(reloaded.meeting(id: m.id)?.summary?.actionItems == ["Alex: fix redirects by Friday."],
+                  "resumed summary produces action items")
+            var stale = failed
+            stale.transcript = [TranscriptSegment(speaker: "S1", text: "Incomplete previous transcript.")]
+            MeetingStore(url: url).save([stale])
+            let force = TranscriberViewModel(capture: RecordingAudioCapture(directory: suiteRecordings), processor: pipeline,
+                                            settings: settings, settingsStore: .inMemory(), meetingStore: MeetingStore(url: url))
+            let replaced = await force.retry(id: m.id, reuseTranscript: false)
+            check(replaced && transcriber.calls == 2 && force.meeting(id: m.id)?.transcript != stale.transcript,
+                  "explicit retranscription replaces an incomplete checkpoint with fresh speech")
+        }
+    }
+}
+
+section("summary quality failures preserve the original recording")
+do {
+    struct GenericSummarizer: Summarizer {
+        func summarize(segments: [TranscriptSegment], title: String) async throws -> MeetingSummary {
+            MeetingSummary(
+                overall: "The meeting focused on analyzing the content ecosystem for LEO SEO. Key discussions centered on content strategy and outcomes were discussed.",
+                keyPoints: ["Analysis of content ecosystem for LEO SEO", "Discussion of content strategy"])
+        }
+    }
+    let detailedSpeech = String(repeating: "Alex will fix the audit dashboard by Friday. This is the highest priority because attribution is missing. ", count: 90)
+    let pipeline = PipelineProcessor(transcriber: StubTranscriber(segs: [TranscriptSegment(speaker: "Alex", text: detailedSpeech)]),
+                                     diarizer: IdentityDiarizer(), summarizer: GenericSummarizer())
+    let vm = TranscriberViewModel(capture: RecordingAudioCapture(directory: suiteRecordings), processor: pipeline,
+                                 settingsStore: .inMemory(), meetingStore: .inMemory())
+    let m = await vm.startAsync(title: "Ecosystem audit")
+    await vm.stopAsync()
+    let failed = vm.meeting(id: m.id)!
+    check(failed.status == .failed && failed.failureReason?.contains("too sparse") == true,
+          "generic topic-only summary fails with retry guidance")
+    check(!failed.audioFileURLs.isEmpty && failed.audioFileURLs.values.allSatisfy { FileManager.default.fileExists(atPath: $0.path) },
+          "sparse summary does not delete original audio under default retention")
+
+    let longMeeting = Meeting(title: "Hour-long audit", startedAt: t0, stoppedAt: t0.addingTimeInterval(3600), duration: 3600, createdAt: t0, lastActivityAt: t0)
+    let partial = PipelineProcessor(transcriber: StubTranscriber(segs: [TranscriptSegment(speaker: "S1", text: "We discussed content strategy.")]),
+                                    diarizer: IdentityDiarizer(), summarizer: GenericSummarizer())
+    do {
+        _ = try await partial.process(meeting: longMeeting, audio: CapturedAudio(), report: { _ in })
+        check(false, "tiny transcript from an hour-long meeting must fail")
+    } catch let error as LLMError {
+        check(error.message.contains("Very little speech"), "short recognition result cannot silently pass as a full meeting")
+    }
+    try Summary.validateDetail(MeetingSummary(overall: "A brief check-in."), segments: [TranscriptSegment(speaker: "S1", text: "Brief check-in.")])
+    check(true, "brief meetings can still have brief notes")
+} catch { check(false, "summary quality: \(error)") }
 
 section("hardening: cancellation preserves audio for retry")
 do {

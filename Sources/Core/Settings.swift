@@ -6,19 +6,14 @@ import Foundation
 // (new keys default, so old files still load) and a `SettingsStore` with an
 // `inMemory()` seam so tests never touch the user's real settings.json.
 //
-// The two decisions that drive the pipeline:
-//   - `transcriptionBackend`: local (Apple Speech, on-device, private, no key)
-//     or cloud (Deepgram, best speaker ID, needs an API key in the Keychain).
-//   - `summaryBackend`: local (on-device Apple Intelligence), OpenAI, or
-//     Anthropic.
-//
-// `whisperModel` is a reserved field from an earlier design (an optional
-// whisper.cpp transcriber) that the current app does not use — the local path
-// is Apple Speech, which needs no model. It is kept (and lenient-decoded) so
-// settings.json files written by older builds still load.
+// Standard fresh-install path: downloaded Whisper transcription and a compact
+// downloaded local summary model. Apple and cloud backends remain explicit
+// alternatives. Saved choices and legacy files retain their selected backends.
+// Asset downloads happen on explicit setup or first use, never just on launch.
 
 /// Where transcription + speaker ID happens.
 public enum TranscriptionBackend: String, Codable, CaseIterable, Sendable {
+    case whisper
     /// Apple Speech, on-device, private. No API key, no model download.
     /// Speaker ID is best-effort (heuristic diarization).
     case local
@@ -29,6 +24,7 @@ public enum TranscriptionBackend: String, Codable, CaseIterable, Sendable {
 
 /// Where the summary comes from.
 public enum SummaryBackend: String, Codable, CaseIterable, Sendable {
+    case localModel
     /// On-device Apple Intelligence model — fully local, offline, no API key,
     /// no model download. Requires macOS 26+ with Apple Intelligence enabled;
     /// the app degrades gracefully (a clear error) on older systems.
@@ -53,6 +49,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var transcriptionBackend: TranscriptionBackend
     public var whisperModel: String
     public var language: String
+    public var transcriptionVocabulary: String
 
     // Summary
     public var summaryBackend: SummaryBackend
@@ -71,10 +68,11 @@ public struct AppSettings: Codable, Equatable, Sendable {
         storageDirectory: URL? = StorageDirectory.defaultDirectory,
         keepTranscriptAfterSummary: Bool = false,
         keepAudioAfterSummary: Bool = false,
-        transcriptionBackend: TranscriptionBackend = .local,
-        whisperModel: String = "whisper-base",
+        transcriptionBackend: TranscriptionBackend = .whisper,
+        whisperModel: String = WhisperCatalog.defaultID,
         language: String = "en",
-        summaryBackend: SummaryBackend = .local,
+        transcriptionVocabulary: String = "",
+        summaryBackend: SummaryBackend = .localModel,
         summaryModel: String? = nil,
         promptOverride: String? = nil,
         showToasts: Bool = true,
@@ -90,6 +88,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.transcriptionBackend = transcriptionBackend
         self.whisperModel = whisperModel
         self.language = language
+        self.transcriptionVocabulary = transcriptionVocabulary
         self.summaryBackend = summaryBackend
         self.summaryModel = summaryModel ?? Self.defaultSummaryModel(for: summaryBackend)
         self.promptOverride = promptOverride
@@ -99,6 +98,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
 
     public static func defaultSummaryModel(for backend: SummaryBackend) -> String {
         switch backend {
+        case .localModel: return SummaryModelCatalog.defaultID
         case .local: return ""
         case .openai: return "gpt-4o-mini"
         case .anthropic: return "claude-haiku-4-5"
@@ -118,7 +118,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case captureMic, captureSystem, inputDeviceID, inputDeviceName
         case storageDirectory, keepTranscriptAfterSummary, keepAudioAfterSummary
-        case transcriptionBackend, whisperModel, language
+        case transcriptionBackend, whisperModel, language, transcriptionVocabulary
         case summaryBackend, summaryModel, promptOverride
         case showToasts, notifyOnSummary
     }
@@ -135,10 +135,11 @@ public struct AppSettings: Codable, Equatable, Sendable {
         storageDirectory = try d.decodeIfPresent(URL.self, forKey: .storageDirectory)
         keepTranscriptAfterSummary = try d.decodeIfPresent(Bool.self, forKey: .keepTranscriptAfterSummary) ?? def.keepTranscriptAfterSummary
         keepAudioAfterSummary = try d.decodeIfPresent(Bool.self, forKey: .keepAudioAfterSummary) ?? def.keepAudioAfterSummary
-        transcriptionBackend = try d.decodeIfPresent(TranscriptionBackend.self, forKey: .transcriptionBackend) ?? def.transcriptionBackend
+        transcriptionBackend = try d.decodeIfPresent(TranscriptionBackend.self, forKey: .transcriptionBackend) ?? .local
         whisperModel = try d.decodeIfPresent(String.self, forKey: .whisperModel) ?? def.whisperModel
         language = try d.decodeIfPresent(String.self, forKey: .language) ?? def.language
-        summaryBackend = try d.decodeIfPresent(SummaryBackend.self, forKey: .summaryBackend) ?? def.summaryBackend
+        transcriptionVocabulary = try d.decodeIfPresent(String.self, forKey: .transcriptionVocabulary) ?? ""
+        summaryBackend = try d.decodeIfPresent(SummaryBackend.self, forKey: .summaryBackend) ?? .local
         summaryModel = try d.decodeIfPresent(String.self, forKey: .summaryModel) ?? Self.defaultSummaryModel(for: summaryBackend)
         promptOverride = try d.decodeIfPresent(String.self, forKey: .promptOverride)
         showToasts = try d.decodeIfPresent(Bool.self, forKey: .showToasts) ?? def.showToasts
@@ -280,6 +281,7 @@ public struct RetentionPolicy: Sendable {
         // This also covers a crash before the transcriber's local cleanup ran.
         if let directory = meeting.audioFileURLs.values.first?.deletingLastPathComponent() {
             urls.append(directory.appendingPathComponent(CapturedAudio.preparedFileName))
+            urls.append(directory.appendingPathComponent(CapturedAudio.speechSectionFileName))
         }
         if !settings.keepAudioAfterSummary {
             urls.append(contentsOf: meeting.audioFileURLs.values)

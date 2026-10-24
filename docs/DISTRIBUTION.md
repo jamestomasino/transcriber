@@ -90,3 +90,13 @@ The workflow itself has not been dispatched during this work.
 Mac App Store distribution would require a separate sandbox, provisioning, and
 capture compatibility review. This repository currently targets direct
 Developer ID distribution.
+
+Downloaded local inference uses a pinned, checksum-verified Whisper framework
+and a pinned llama.cpp helper. The runtime archives target macOS 13.3 or later,
+so the app's macOS 14 deployment target is retained. Developer ID builds include
+`com.apple.security.cs.disable-library-validation` so the separately downloaded
+Whisper framework can load under the hardened runtime. Archive verification and
+matching C ABI declarations are required; do not replace these with unpinned
+runtime downloads. The Whisper MIT license is copied into the app resources;
+llama.cpp's license ships with its downloaded runtime. Model source/license links
+are shown beside downloads. See [local models](LOCAL_MODELS.md).

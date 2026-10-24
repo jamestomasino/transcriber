@@ -24,6 +24,7 @@ struct ContentView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
+            LocalModelDownloadBanner()
             Divider()
             if vm.isRecording { meter; Divider() }
             if vm.hasCaptureProblem || vm.processingError != nil { statusCard; Divider() }

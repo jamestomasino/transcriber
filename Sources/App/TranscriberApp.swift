@@ -32,7 +32,7 @@ struct TranscriberApp: App {
         // Keep recordings and history on the same root for the whole session.
         // A location change in Settings takes effect on the next launch.
         RecordingsDirectory.baseDirectory = { StorageDirectory.recordingsURL(settings: settings) }
-        _vm = StateObject(wrappedValue: TranscriberViewModel(
+        let model = TranscriberViewModel(
             capture: AVAudioCapture(inputDeviceUID: { settingsStore.load().inputDeviceID }),
             processor: ProcessorFactory.make(settings: settings),
             settings: settings,
@@ -49,11 +49,53 @@ struct TranscriberApp: App {
             // ready. The *decision* is pure Core; this poster owns the
             // platform call.
             notifier: { note in MeetingNotifications.post(note) }
-        ))
+        )
+        _vm = StateObject(wrappedValue: model)
+        // Explicit recovery invocation; normal launches never retry automatically.
+        let arguments = CommandLine.arguments
+        if arguments.contains("--use-local-models") {
+            model.updateSettings {
+                $0.transcriptionBackend = .whisper; $0.whisperModel = WhisperCatalog.defaultID
+                $0.summaryBackend = .localModel; $0.summaryModel = SummaryModelCatalog.defaultID
+            }
+        }
+        if let index = arguments.firstIndex(where: { $0 == "--retry-meeting" || $0 == "--retranscribe-meeting" }),
+           arguments.indices.contains(index + 1),
+           let id = UUID(uuidString: arguments[index + 1]) {
+            Task { @MainActor in _ = await model.retry(id: id, reuseTranscript: arguments[index] != "--retranscribe-meeting") }
+        }
+        if arguments.contains("--validate-local-speech") {
+            Task { await Self.validateLocalSpeech() }
+        }
         // Ask for the banner permission once, on launch, so the first finished
         // meeting can actually post. Idempotent — macOS won't re-prompt after
         // the user has decided.
         MeetingNotifications.requestAuthorization()
+    }
+
+    /// Run inside the app's existing Speech authorization, using only synthetic
+    /// audio in an isolated temporary folder. Does not create or retry meetings.
+    private static func validateLocalSpeech() async {
+        let output = FileManager.default.temporaryDirectory.appendingPathComponent("transcriber-hosted-speech-check.json")
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("transcriber-speech-check-\(UUID().uuidString)")
+        var result: [String: Any] = [:]
+        do {
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let audio = root.appendingPathComponent("fixture.aiff")
+            let say = Process()
+            say.executableURL = URL(fileURLWithPath: "/usr/bin/say")
+            say.arguments = ["-o", audio.path,
+                "First item. Alex will write release notes by Friday. [[slnc 3000]] Second item. Blair will review the budget by Tuesday. [[slnc 3000]] Third item. Casey will update the website by Thursday."]
+            try say.run()
+            say.waitUntilExit()
+            guard say.terminationStatus == 0 else { throw SpeechError("Could not create Speech fixture") }
+            let segments = try await LocalSpeechTranscriber().transcribe(audio: CapturedAudio(fileURLs: [.mic: audio]), language: "en-US")
+            let text = segments.map(\.text).joined(separator: " ").lowercased()
+            let checks = Dictionary(uniqueKeysWithValues: ["release", "budget", "website", "friday", "tuesday", "thursday"].map { ($0, text.contains($0)) })
+            result = ["passed": checks.values.allSatisfy { $0 }, "checks": checks, "words": text.split(separator: " ").count]
+        } catch { result = ["passed": false, "error": error.localizedDescription] }
+        if let data = try? JSONSerialization.data(withJSONObject: result, options: [.sortedKeys]) { try? data.write(to: output, options: .atomic) }
     }
 
     var body: some Scene {

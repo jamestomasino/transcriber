@@ -182,7 +182,9 @@ struct MeetingDetailView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            Text("You can retry it below (it uses the current backend and key).")
+            Text(live?.transcript.isEmpty == false
+                 ? "The transcript is saved. Retry summary uses your current summary backend; Transcribe again also reruns speech recognition."
+                 : "Retry uses the current transcription and summary backends.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
         }
@@ -208,7 +210,13 @@ struct MeetingDetailView: View {
     // MARK: - Actions
 
     private var actions: some View {
-        HStack(spacing: 10) {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 10) { actionButtons }
+            VStack(alignment: .leading, spacing: 10) { actionButtons }
+        }
+    }
+
+    @ViewBuilder private var actionButtons: some View {
             if live?.status == .processing {
                 Button("Cancel processing") { vm.cancelProcessing(id: meeting.id) }
             }
@@ -220,10 +228,16 @@ struct MeetingDetailView: View {
                     retrying = true
                     Task { await vm.retry(id: meeting.id); retrying = false }
                 } label: {
-                    Label("Retry", systemImage: "arrow.clockwise")
+                    Label(live?.transcript.isEmpty == false ? "Retry summary" : "Retry", systemImage: "arrow.clockwise")
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(retrying)
+                if live?.transcript.isEmpty == false, live?.audioFileURLs.isEmpty == false {
+                    Button("Transcribe again") {
+                        retrying = true
+                        Task { await vm.retry(id: meeting.id, reuseTranscript: false); retrying = false }
+                    }.disabled(retrying)
+                }
             }
             if let s = live?.summary, !s.overall.isEmpty {
                 Button {
@@ -245,14 +259,12 @@ struct MeetingDetailView: View {
                 Button { NSWorkspace.shared.activateFileViewerSelecting([url]) } label: { Image(systemName: "folder") }
                     .help("Show retained audio in Finder")
             }
-            Spacer()
             Button(role: .destructive) {
                 confirmDelete = true
             } label: {
                 Label("Delete", systemImage: "trash")
             }
             .disabled(live?.status == .recording || live?.status == .processing)
-        }
     }
 
     private func copy(text: String, label: String) {
