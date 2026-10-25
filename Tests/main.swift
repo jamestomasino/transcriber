@@ -530,6 +530,27 @@ final class StubSummarizer: Summarizer {
         MeetingSummary(overall: "sum of \(segments.count) segs", keyPoints: ["kp"])
     }
 }
+/// Test-only gap splitter: a segment that begins more than `gap` seconds after
+/// the previous one ends starts a new speaker. Stands in for a real diarizer so
+/// the pipeline composition is exercised without depending on removed code.
+struct GapDiarizer: Diarizer {
+    let gap: TimeInterval
+    func diarize(_ segments: [TranscriptSegment]) async throws -> [TranscriptSegment] {
+        guard !segments.isEmpty else { return segments }
+        let ordered = segments.sorted { $0.startOffset < $1.startOffset }
+        var out: [TranscriptSegment] = []
+        var speaker = 1
+        var lastEnd = ordered[0].startOffset
+        for seg in ordered {
+            if seg.startOffset - lastEnd > gap { speaker += 1 }
+            var labeled = seg
+            labeled.speaker = "Speaker \(speaker)"
+            out.append(labeled)
+            lastEnd = max(lastEnd, seg.endOffset)
+        }
+        return out
+    }
+}
 do {
     let rawSegs = [
         TranscriptSegment(speaker: "?", text: "a", startOffset: 0, endOffset: 1),
@@ -537,7 +558,7 @@ do {
     ]
     let p4 = PipelineProcessor(
         transcriber: StubTranscriber(segs: rawSegs),
-        diarizer: HeuristicDiarizer(gapThreshold: 1.5),
+        diarizer: GapDiarizer(gap: 1.5),
         summarizer: StubSummarizer(),
         language: "en"
     )
@@ -746,10 +767,10 @@ do {
     check(repairNotifications.isEmpty, "speaker-only updates do not announce a newly generated or failed summary")
 } catch { check(false, "speaker matching: \(error)") }
 
-// MARK: - Phase 4: heuristic diarizer
-section("diarizer: heuristic speaker splitting")
+// MARK: - Phase 4: diarizer
+section("diarizer: gap splitting and identity passthrough")
 do {
-    let d = HeuristicDiarizer(gapThreshold: 1.0)
+    let d = GapDiarizer(gap: 1.0)
     let noGap = [
         TranscriptSegment(speaker: "?", text: "a", startOffset: 0, endOffset: 0.5),
         TranscriptSegment(speaker: "?", text: "b", startOffset: 0.6, endOffset: 1.0),
