@@ -117,7 +117,11 @@ struct LocalSpeakerDiarizer: AudioDiarizer {
     static func prepareWave(input: URL, output: URL) throws {
         let source = try AVAudioFile(forReading: input)
         // Bound the offline helper's whole-file float buffer to ~460 MB.
-        // Longer recordings retain all speech, but need a streaming diarizer.
+        // The pinned runtime ships only the offline diarization binary (no
+        // streaming diarizer or standalone embedding binary), so windowed
+        // cross-window identity is not available. Longer recordings still
+        // succeed end-to-end: diarization failure is non-fatal and the meeting
+        // falls back to an unlabeled transcript with unverified attribution.
         guard Double(source.length) / source.processingFormat.sampleRate <= 2 * 60 * 60 else {
             throw LocalInferenceError("Local voice matching currently supports recordings up to two hours. Original audio was kept.")
         }

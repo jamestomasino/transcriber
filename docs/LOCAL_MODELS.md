@@ -375,10 +375,15 @@ Audio preparation streams 30-second sections into a managed transient
 `speaker-analysis.wav` (16 kHz mono PCM). It is always removed after matching,
 even when source recordings are retained; crash recovery also sweeps it. The
 offline runtime currently accepts recordings up to two hours, bounding its
-whole-file float buffer to about 460 MB. Longer recordings retain their sources
-and report the unsupported speaker stage. Inference is serialized with Whisper
-and summarization and uses two CPU threads per speaker model. The helper is
-reaped after completion, cancellation, or parent-pipe EOF.
+whole-file float buffer to about 460 MB. The pinned runtime ships only the
+offline diarization binary (no streaming diarizer or standalone embedding
+binary), so windowed cross-window identity is not available. Longer recordings
+still complete end-to-end: diarization failure is non-fatal, the meeting falls
+back to an unlabeled transcript, the summary is still produced, and the
+attribution is marked unverified (the explicit "reprocess speakers" path
+remains the retry for a user who wants labels). Inference is serialized with
+Whisper and summarization and uses two CPU threads per speaker model. The helper
+is reaped after completion, cancellation, or parent-pipe EOF.
 
 The public sherpa four-speaker fixture tests recurring identities across
 separated turns, not just the resulting count. Automatic clustering thresholds
