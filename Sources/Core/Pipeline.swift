@@ -179,6 +179,7 @@ public struct PipelineProcessor: TranscriptCheckpointingProcessor, SpeakerReproc
         checkpoint: @Sendable ([TranscriptSegment]) async throws -> Void
     ) async throws -> ProcessedResult {
         let segments: [TranscriptSegment]
+        var diarizationSucceeded = false
         if !meeting.transcript.isEmpty {
             // Retained transcripts are already diarized. Retry only the failed
             // summary stage rather than repeat a lengthy transcription.
@@ -207,11 +208,23 @@ public struct PipelineProcessor: TranscriptCheckpointingProcessor, SpeakerReproc
                 }
                 try await stageAdmission()
                 report(ProcessingProgress(stage: .diarizing, fraction: 0))
-                segments = try await ProcessingMeasurements.measure("speaker.analysis") {
-                    if let acoustic = diarizer as? any AudioDiarizer {
-                        return try await acoustic.diarize(raw, audio: prepared.audio, report: report)
+                do {
+                    segments = try await ProcessingMeasurements.measure("speaker.analysis") {
+                        if let acoustic = diarizer as? any AudioDiarizer {
+                            return try await acoustic.diarize(raw, audio: prepared.audio, report: report)
+                        }
+                        return try await diarizer.diarize(raw)
                     }
-                    return try await diarizer.diarize(raw)
+                    diarizationSucceeded = true
+                } catch {
+                    // Speaker attribution is an enhancement, not a requirement.
+                    // A diarization failure (e.g. a recording longer than the
+                    // offline runtime's buffer, or unmatchable voices) must not
+                    // fail the meeting: fall back to the unlabeled transcript,
+                    // still summarize, and mark the attribution as unverified.
+                    // The explicit "reprocess speakers" path remains the retry
+                    // for a user who wants labels.
+                    segments = raw
                 }
                 try prepared.cleanup()
             } catch { try? prepared.cleanup(); throw error }
@@ -235,8 +248,15 @@ public struct PipelineProcessor: TranscriptCheckpointingProcessor, SpeakerReproc
         }
         try Summary.validateDetail(summary, segments: cleaned)
         report(ProcessingProgress(stage: .summarizing, fraction: 1))
+        // When diarization failed on a fresh meeting, the result's speaker
+        // labels are the unlabeled raw transcript, so the attribution is
+        // unverified. A retained transcript (summary-only retry) keeps its
+        // existing provenance.
+        let attribution = meeting.transcript.isEmpty
+            ? (diarizationSucceeded ? speakerAttribution : .unverified)
+            : meeting.speakerAttribution
         return ProcessedResult(segments: cleaned, summary: summary,
-                               speakerAttribution: meeting.transcript.isEmpty ? speakerAttribution : meeting.speakerAttribution)
+                               speakerAttribution: attribution)
     }
 
     public func reprocessSpeakers(meeting: Meeting, audio: CapturedAudio,

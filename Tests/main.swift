@@ -2241,6 +2241,28 @@ do {
     }
 } catch { check(false, "silent pipeline: \(error)") }
 
+section("hardening: diarization failure is non-fatal — meeting still succeeds")
+do {
+    struct ThrowingDiarizer: Diarizer {
+        func diarize(_ segments: [TranscriptSegment]) async throws -> [TranscriptSegment] {
+            throw LLMError("Local voice matching currently supports recordings up to two hours.")
+        }
+    }
+    let rawSegs = [TranscriptSegment(speaker: "S1", text: "We decided to launch on Friday."),
+                   TranscriptSegment(speaker: "S2", text: "Great, I'll prepare the budget.")]
+    let pipeline = PipelineProcessor(transcriber: StubTranscriber(segs: rawSegs),
+                                     diarizer: ThrowingDiarizer(),
+                                     summarizer: StubSummarizer(),
+                                     speakerAttribution: .voiceClustering)
+    let meeting = Meeting(title: "Long meeting", startedAt: .distantPast, createdAt: .distantPast, lastActivityAt: .distantPast)
+    let result = try await pipeline.process(meeting: meeting, audio: CapturedAudio(), report: { _ in })
+    check(result.summary.overall.contains("2 segs"), "meeting still gets a summary when diarization fails")
+    check(result.speakerAttribution == .unverified, "attribution is unverified when diarization fails")
+    check(result.segments.count == 2, "unlabeled transcript is preserved")
+    check(result.segments.allSatisfy { $0.speaker != "Speaker 1" && $0.speaker != "Speaker 2" },
+          "segments are not labeled when diarization fails")
+} catch { check(false, "non-fatal diarization: \(error)") }
+
 section("speech snapshots preserve earlier utterances and accept corrections")
 do {
     func word(_ text: String, _ start: Double, _ end: Double) -> TranscriptSegment {
