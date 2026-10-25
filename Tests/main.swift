@@ -2199,8 +2199,25 @@ do {
     check(summary.overall.contains("MIDDLE DECISION"), "long local summary includes the middle section")
     check(summary.decisions == ["One shared decision"], "merging removes repeated decisions")
     check(!summary.transcriptWasCapped, "complete section summaries are not marked truncated")
+    check(!summary.overall.hasPrefix("Part 1:"), "a unified overall is synthesized, not stitched as Part 1 / Part 2")
     let unicode = [TranscriptSegment(speaker: "話者", text: String(repeating: "こんにちは🌍", count: 200))]
     check(ChunkingSummarizer.chunks(unicode, budget: 256).flatMap { $0 }.map(\.text).joined() == unicode[0].text, "Unicode chunking preserves characters")
+
+    // The reduce is a refinement, not a requirement: if the synthesis call
+    // fails, the meeting still succeeds via the structural merge.
+    struct FailingReduce: Summarizer {
+        func summarize(segments: [TranscriptSegment], title: String) async throws -> MeetingSummary {
+            // The reduce passes a single "Summary" segment (the digest).
+            if segments.count == 1 && segments[0].speaker == "Summary" {
+                throw LLMError("synthesis failed")
+            }
+            return MeetingSummary(overall: segments.map(\.text).joined(), decisions: ["One shared decision"], model: "test")
+        }
+    }
+    let fallback = try await ChunkingSummarizer(inner: FailingReduce(), transcriptBudget: 256).summarize(segments: source, title: "Long meeting")
+    check(fallback.overall.contains("MIDDLE DECISION"), "a failed reduce still covers the middle via the merge")
+    check(fallback.overall.hasPrefix("Part 1:"), "a failed reduce falls back to the structural merge")
+    check(fallback.decisions == ["One shared decision"], "a failed reduce preserves the deduplicated decisions")
 } catch { check(false, "chunked summary: \(error)") }
 
 section("hardening: empty speech does not proceed to a destructive success")

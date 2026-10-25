@@ -331,26 +331,82 @@ public struct ChunkingSummarizer: Summarizer {
 
     public func summarize(segments: [TranscriptSegment], title: String) async throws -> MeetingSummary {
         let chunks = Self.chunks(segments, budget: transcriptBudget)
-        var results: [MeetingSummary] = []
+        // Map: summarize each section independently. Every part of the
+        // transcript reaches the model — including the middle — so a long
+        // meeting no longer loses its center.
+        var sections: [MeetingSummary] = []
+        sections.reserveCapacity(chunks.count)
         for chunk in chunks {
             try Task.checkCancellation()
-            results.append(try await inner.summarize(segments: chunk, title: title))
+            sections.append(try await inner.summarize(segments: chunk, title: title))
         }
-        guard results.count > 1 else {
-            return results.first ?? MeetingSummary(overall: "")
+        guard sections.count > 1 else {
+            return sections.first ?? MeetingSummary(overall: "")
         }
-        func unique(_ values: [String]) -> [String] {
-            var seen: Set<String> = []
-            return values.filter { seen.insert($0).inserted }
+
+        // Reduce: bring the section summaries back together and synthesize one
+        // coherent overall narrative from the whole meeting, instead of
+        // stitching "Part 1 / Part 2" paragraphs. The reduce reuses the same
+        // Summarizer seam (the digest is one segment), so it works for any
+        // backend. If the reduce call fails, fall back to the structural merge
+        // so a long meeting still succeeds.
+        do {
+            try Task.checkCancellation()
+            let reduced = try await inner.summarize(segments: [Self.digest(sections)], title: title)
+            return Self.synthesize(reduced, sections: sections)
+        } catch {
+            return Self.merge(sections)
         }
+    }
+
+    /// Build a compact, chronological digest from the section summaries so a
+    /// single reduce call can synthesize one coherent overall. It preserves the
+    /// substantive content (key points, decisions, action items) that the
+    /// per-section summaries already captured, so the reduce is grounded in the
+    /// whole meeting rather than re-reading the raw transcript.
+    private static func digest(_ sections: [MeetingSummary]) -> TranscriptSegment {
+        let parts = sections.enumerated().map { index, section in
+            let bullets = (section.keyPoints + section.decisions + section.actionItems)
+            let body = bullets.isEmpty ? section.overall : bullets.joined(separator: "; ")
+            let line = section.overall.isEmpty
+                ? body
+                : section.overall + " " + body
+            return "Section \(index + 1): \(line)"
+        }
+        let text = parts.joined(separator: "\n")
+        return TranscriptSegment(speaker: "Summary", text: text, startOffset: 0, endOffset: 0)
+    }
+
+    /// Combine a reduce (synthesized) summary with the per-section lists so no
+    /// decision or action item is lost in the synthesis. The reduce's `overall`
+    /// is the coherent narrative; the lists are the union of the sections'
+    /// lists (deduplicated) plus any the reduce added.
+    private static func synthesize(_ reduced: MeetingSummary, sections: [MeetingSummary]) -> MeetingSummary {
+        var result = reduced
+        result.keyPoints = unique(sections.flatMap(\.keyPoints) + reduced.keyPoints)
+        result.decisions = unique(sections.flatMap(\.decisions) + reduced.decisions)
+        result.actionItems = unique(sections.flatMap(\.actionItems) + reduced.actionItems)
+        result.transcriptWasCapped = sections.contains(where: \.transcriptWasCapped) || reduced.transcriptWasCapped
+        return result
+    }
+
+    /// Structural fallback: concatenate the section summaries. Used only when
+    /// the reduce synthesis fails, so a long meeting still succeeds.
+    private static func merge(_ sections: [MeetingSummary]) -> MeetingSummary {
         return MeetingSummary(
-            overall: results.enumerated().map { "Part \($0.offset + 1): \($0.element.overall)" }.joined(separator: "\n\n"),
-            keyPoints: unique(results.flatMap(\.keyPoints)),
-            decisions: unique(results.flatMap(\.decisions)),
-            actionItems: unique(results.flatMap(\.actionItems)),
-            model: unique(results.map(\.model)).joined(separator: ", "),
-            transcriptWasCapped: results.contains(where: \.transcriptWasCapped)
+            overall: sections.enumerated().map { "Part \($0.offset + 1): \($0.element.overall)" }.joined(separator: "\n\n"),
+            keyPoints: unique(sections.flatMap(\.keyPoints)),
+            decisions: unique(sections.flatMap(\.decisions)),
+            actionItems: unique(sections.flatMap(\.actionItems)),
+            model: unique(sections.map(\.model)).joined(separator: ", "),
+            transcriptWasCapped: sections.contains(where: \.transcriptWasCapped)
         )
+    }
+
+    /// Order-preserving de-duplication for merged list fields.
+    private static func unique(_ values: [String]) -> [String] {
+        var seen: Set<String> = []
+        return values.filter { seen.insert($0).inserted }
     }
 
     public static func chunks(_ segments: [TranscriptSegment], budget: Int) -> [[TranscriptSegment]] {
