@@ -299,45 +299,6 @@ public struct IdentityDiarizer: Diarizer {
     }
 }
 
-// MARK: - Heuristic diarizer
-//
-// Legacy pause grouping, retained for compatibility/testing. These labels
-// describe turn groups, not measured speaker identities. Production local
-// pipelines use an injected AudioDiarizer with acoustic models instead.
-//
-// Pure and deterministic, so it is unit-testable in Core.
-
-public struct HeuristicDiarizer: Diarizer {
-    /// Segments closer in time than this (seconds) are treated as the same
-    /// speaker continuing; a larger gap starts a new speaker.
-    public let gapThreshold: TimeInterval
-
-    public init(gapThreshold: TimeInterval = 1.5) {
-        self.gapThreshold = gapThreshold
-    }
-
-    public func diarize(_ segments: [TranscriptSegment]) async throws -> [TranscriptSegment] {
-        guard !segments.isEmpty else { return segments }
-
-        let ordered = segments.sorted { $0.startOffset < $1.startOffset }
-        var result: [TranscriptSegment] = []
-        var currentSpeaker = 1
-        var lastEnd = ordered[0].startOffset
-
-        for seg in ordered {
-            // A gap beyond the threshold means (heuristically) a different speaker.
-            if seg.startOffset - lastEnd > gapThreshold {
-                currentSpeaker += 1
-            }
-            var labeled = seg
-            labeled.speaker = "Speaker \(currentSpeaker)"
-            result.append(labeled)
-            lastEnd = max(lastEnd, seg.endOffset)
-        }
-        return result
-    }
-}
-
 // MARK: - No-op processor
 //
 // The default processor until the app wires a real one: it does nothing and
